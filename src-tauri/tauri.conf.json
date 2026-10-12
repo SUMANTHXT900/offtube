@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Offtube",
+  "version": "0.1.0",
+  "identifier": "com.offtube.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Offtube",
+        "width": 1120,
+        "height": 720,
+        "minWidth": 880,
+        "minHeight": 560,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/yt-dlp",
+      "binaries/ffmpeg",
+      "binaries/deno"
+    ],
+    "category": "Utility",
+    "shortDescription": "Offline-first YouTube downloader",
+    "longDescription": "Offtube is a personal offline-first YouTube downloader: paste a link, pick quality, download. Powered by yt-dlp."
+  }
+}

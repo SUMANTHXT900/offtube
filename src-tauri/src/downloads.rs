@@ -1,0 +1,543 @@
+//! Download orchestration: metadata preview (`-J`), quality-selected downloads
+//! with progress events, and cancellation.
+//!
+//! The Rust side never implements fetching itself — it spawns the yt-dlp
+//! sidecar, parses its machine-readable output, and relays typed events:
+//! `download-progress`, `download-complete`, `download-error`,
+//! `download-cancelled`. The queue lives in the frontend (zustand).
+
+use crate::settings::{effective_download_dir, load_settings};
+use crate::sidecar::{self, TOOL_YTDLP};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatInfo {
+    pub format_id: String,
+    pub ext: String,
+    pub resolution: Option<String>,
+    pub fps: Option<f64>,
+    pub vcodec: Option<String>,
+    pub acodec: Option<String>,
+    pub filesize: Option<u64>,
+    pub tbr: Option<f64>,
+    pub abr: Option<f64>,
+    pub format_note: Option<String>,
+    pub protocol: Option<String>,
+    pub is_video: bool,
+    pub is_audio: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoMetadata {
+    pub id: String,
+    pub title: String,
+    pub uploader: Option<String>,
+    pub channel: Option<String>,
+    pub duration: Option<u64>,
+    pub view_count: Option<u64>,
+    pub upload_date: Option<String>,
+    pub description: Option<String>,
+    pub thumbnail: Option<String>,
+    pub webpage_url: String,
+    pub formats: Vec<FormatInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRequest {
+    pub id: String,
+    pub url: String,
+    pub format_selector: String,
+    pub audio_only: bool,
+    pub output_dir: Option<String>,
+    pub extra_args: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressEvent {
+    pub id: String,
+    pub percent: Option<f64>,
+    pub total: Option<String>,
+    pub speed: Option<String>,
+    pub eta: Option<String>,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoneEvent {
+    pub id: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailEvent {
+    pub id: String,
+    pub error: String,
+}
+
+/// Live download handles for cancellation.
+pub struct ActiveDownload {
+    pub child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
+    pub cancelled: Arc<AtomicBool>,
+}
+
+pub type ActiveMap = Mutex<HashMap<String, ActiveDownload>>;
+
+// ---------------------------------------------------------------------------
+// Metadata
+// ---------------------------------------------------------------------------
+
+fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn u64_field(v: &serde_json::Value, key: &str) -> Option<u64> {
+    v.get(key).and_then(|x| {
+        x.as_u64().or_else(|| {
+            x.as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0)
+                .map(|f| f as u64)
+        })
+    })
+}
+
+fn f64_field(v: &serde_json::Value, key: &str) -> Option<f64> {
+    v.get(key).and_then(|x| {
+        x.as_f64().or_else(|| x.as_u64().map(|n| n as f64))
+    })
+}
+
+fn pick_thumbnail(v: &serde_json::Value) -> Option<String> {
+    let mut best: Option<(u64, String)> = None;
+    if let Some(arr) = v.get("thumbnails").and_then(|t| t.as_array()) {
+        for t in arr {
+            let url = match t.get("url").and_then(|u| u.as_str()) {
+                Some(u) => u.to_string(),
+                None => continue,
+            };
+            let w = t.get("width").and_then(|x| x.as_u64()).unwrap_or(0);
+            let h = t.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
+            let score = w.saturating_mul(h);
+            let better = match &best {
+                None => true,
+                Some((s, _)) => score > *s,
+            };
+            if better {
+                best = Some((score, url));
+            }
+        }
+    }
+    best.map(|(_, u)| u).or_else(|| str_field(v, "thumbnail"))
+}
+
+fn map_format(f: &serde_json::Value) -> Option<FormatInfo> {
+    let format_id = f
+        .get("format_id")
+        .and_then(|x| x.as_str())?
+        .to_string();
+    let vcodec = f
+        .get("vcodec")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let acodec = f
+        .get("acodec")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let is_video = matches!(&vcodec, Some(c) if c != "none");
+    let is_audio = matches!(&acodec, Some(c) if c != "none");
+    let filesize = u64_field(f, "filesize").or_else(|| u64_field(f, "filesize_approx"));
+    Some(FormatInfo {
+        format_id,
+        ext: f
+            .get("ext")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?")
+            .to_string(),
+        resolution: str_field(f, "resolution"),
+        fps: f64_field(f, "fps"),
+        vcodec,
+        acodec,
+        filesize,
+        tbr: f64_field(f, "tbr"),
+        abr: f64_field(f, "abr").or_else(|| f64_field(f, "vbr")),
+        format_note: str_field(f, "format_note"),
+        protocol: str_field(f, "protocol"),
+        is_video,
+        is_audio,
+    })
+}
+
+pub async fn fetch_metadata_impl(
+    app: &AppHandle,
+    url: &str,
+    extra_args: Option<String>,
+) -> Result<VideoMetadata, String> {
+    let mut args = vec![
+        "--no-playlist".to_string(),
+        "--dump-single-json".to_string(),
+        "--no-warnings".to_string(),
+        "--no-progress".to_string(),
+        "--socket-timeout".to_string(),
+        "20".to_string(),
+    ];
+    let extra = extra_args
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| load_settings(app).extra_args);
+    args.extend(sidecar::split_extra_args(&extra));
+    args.extend(sidecar::engine_wiring_args(app));
+    args.push(url.to_string());
+
+    let fut = sidecar::run_tool_capture(app, TOOL_YTDLP, &args);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(90), fut)
+        .await
+        .map_err(|_| "metadata fetch timed out (network slow?)".to_string())?
+        .map_err(|e| e)?;
+
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let msg = if err.is_empty() {
+            format!("yt-dlp exited with {}", out.status)
+        } else {
+            // Surface the last meaningful line (yt-dlp prefixes with ERROR:).
+            err.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(&err)
+                .trim()
+                .to_string()
+        };
+        return Err(msg);
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|e| format!("metadata parse: {e}"))?;
+
+    if v.get("_type").and_then(|t| t.as_str()) == Some("playlist") {
+        return Err("playlists land in v0.2 — paste a single video URL for now".to_string());
+    }
+
+    let formats = v
+        .get("formats")
+        .and_then(|f| f.as_array())
+        .map(|arr| arr.iter().filter_map(map_format).collect())
+        .unwrap_or_default();
+
+    let description = str_field(&v, "description").map(|d| {
+        const MAX: usize = 2000;
+        if d.len() > MAX {
+            format!("{}…", &d[..MAX])
+        } else {
+            d
+        }
+    });
+
+    Ok(VideoMetadata {
+        id: str_field(&v, "id").unwrap_or_else(|| "unknown".to_string()),
+        title: str_field(&v, "title").unwrap_or_else(|| url.to_string()),
+        uploader: str_field(&v, "uploader"),
+        channel: str_field(&v, "channel"),
+        duration: u64_field(&v, "duration"),
+        view_count: u64_field(&v, "view_count"),
+        upload_date: str_field(&v, "upload_date"),
+        description,
+        thumbnail: pick_thumbnail(&v),
+        webpage_url: str_field(&v, "webpage_url").unwrap_or_else(|| url.to_string()),
+        formats,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+fn emit_progress(app: &AppHandle, ev: &ProgressEvent) {
+    let _ = app.emit("download-progress", ev);
+}
+
+fn parse_progress_line(re: &Regex, line: &str) -> Option<(f64, Option<String>, Option<String>, Option<String>)> {
+    let caps = re.captures(line)?;
+    let pct: f64 = caps.get(1)?.as_str().parse().ok()?;
+    let total = caps.get(2).map(|m| m.as_str().to_string());
+    let speed = caps.get(3).map(|m| m.as_str().to_string());
+    let eta = caps.get(4).map(|m| m.as_str().to_string());
+    Some((pct, total, speed, eta))
+}
+
+fn strip_quotes(s: &str) -> String {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        t[1..t.len() - 1].to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+pub async fn start_download_impl(
+    app: AppHandle,
+    active: Arc<ActiveMap>,
+    req: StartRequest,
+) -> Result<(), String> {
+    if req.id.trim().is_empty() {
+        return Err("missing queue id".to_string());
+    }
+    {
+        let map = active.lock().map_err(|e| format!("lock: {e}"))?;
+        if map.contains_key(&req.id) {
+            return Err("download already running for this item".to_string());
+        }
+    }
+
+    let output_dir = match req.output_dir.filter(|s| !s.trim().is_empty()) {
+        Some(d) => {
+            std::fs::create_dir_all(&d).map_err(|e| format!("mkdir output: {e}"))?;
+            d
+        }
+        None => effective_download_dir(&app)?,
+    };
+
+    let mut args = vec![
+        "--no-playlist".to_string(),
+        "--newline".to_string(),
+        "--progress".to_string(),
+        "--no-color".to_string(),
+        "--no-warnings".to_string(),
+        "-f".to_string(),
+        req.format_selector.clone(),
+        "-o".to_string(),
+        format!("{}/%(title)s [%(id)s].%(ext)s", output_dir.replace('\\', "/")),
+    ];
+    if req.audio_only {
+        args.push("-x".to_string());
+        args.push("--audio-format".to_string());
+        args.push("mp3".to_string());
+        args.push("--audio-quality".to_string());
+        args.push("0".to_string());
+    } else {
+        args.push("--merge-output-format".to_string());
+        args.push("mp4".to_string());
+    }
+    if let Some(loc) = sidecar::ffmpeg_location(&app) {
+        args.push("--ffmpeg-location".to_string());
+        args.push(loc);
+    }
+    if let Some(deno) = sidecar::deno_sidecar_path(&app) {
+        args.push("--js-runtimes".to_string());
+        args.push(format!("deno:{deno}"));
+    }
+    let extra = req
+        .extra_args
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| load_settings(&app).extra_args);
+    args.extend(sidecar::split_extra_args(&extra));
+    args.push(req.url.clone());
+
+    let child = sidecar::spawn_tool(&app, TOOL_YTDLP, &args)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let handle = Arc::new(tokio::sync::Mutex::new(child));
+    {
+        let mut map = active.lock().map_err(|e| format!("lock: {e}"))?;
+        map.insert(
+            req.id.clone(),
+            ActiveDownload {
+                child: handle.clone(),
+                cancelled: cancelled.clone(),
+            },
+        );
+    }
+
+    let app_task = app.clone();
+    let id = req.id.clone();
+    let active_task = active.clone();
+    tokio::spawn(async move {
+        let prog_re = Regex::new(
+            r"^\[download\]\s+(\d+(?:\.\d+)?)% of\s+(\S+)(?:\s+at\s+(\S+))?(?:\s+ETA\s+(\S+))?",
+        )
+        .expect("progress regex");
+        let dest_re =
+            Regex::new(r"^\[download\] Destination: (.+)$").expect("dest regex");
+        let merge_re = Regex::new(r#"^\[(?:Merger|ExtractAudio|VideoConvertor)\][^"]*"([^"]+)""#)
+            .expect("merge regex");
+
+        let mut final_path: Option<String> = None;
+        let mut last_error_lines: Vec<String> = Vec::new();
+
+        // Take stdout for the progress loop; drain stderr separately so a
+        // chatty yt-dlp can never block on a full pipe.
+        let (stdout_lines, stderr_handle) = {
+            let mut guard = handle.lock().await;
+            let stdout = guard.stdout.take().map(BufReader::new);
+            let stderr = guard.stderr.take();
+            let lines = stdout.map(|r| r.lines());
+            let app_err = app_task.clone();
+            let id_err = id.clone();
+            let drain = tokio::spawn(async move {
+                let mut tail: Vec<String> = Vec::new();
+                if let Some(s) = stderr {
+                    let mut r = BufReader::new(s).lines();
+                    while let Ok(Some(line)) = r.next_line().await {
+                        let t = line.trim().to_string();
+                        if t.is_empty() {
+                            continue;
+                        }
+                        if t.contains("ERROR") || t.contains("WARNING: ") {
+                            // Surface warnings live as detail updates.
+                            emit_progress(
+                                &app_err,
+                                &ProgressEvent {
+                                    id: id_err.clone(),
+                                    percent: None,
+                                    total: None,
+                                    speed: None,
+                                    eta: None,
+                                    status: "downloading".to_string(),
+                                    detail: Some(t.clone()),
+                                },
+                            );
+                        }
+                        tail.push(t);
+                        if tail.len() > 20 {
+                            tail.remove(0);
+                        }
+                    }
+                }
+                tail
+            });
+            (lines, drain)
+        };
+
+        if let Some(mut lines) = stdout_lines {
+            while let Ok(Some(line)) = lines.next_line().await {
+                let t = line.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if let Some(caps) = dest_re.captures(t) {
+                    if let Some(m) = caps.get(1) {
+                        final_path = Some(strip_quotes(m.as_str()));
+                    }
+                    continue;
+                }
+                if let Some(caps) = merge_re.captures(t) {
+                    if let Some(m) = caps.get(1) {
+                        final_path = Some(strip_quotes(m.as_str()));
+                    }
+                    emit_progress(
+                        &app_task,
+                        &ProgressEvent {
+                            id: id.clone(),
+                            percent: Some(100.0),
+                            total: None,
+                            speed: None,
+                            eta: None,
+                            status: "merging".to_string(),
+                            detail: Some(t.to_string()),
+                        },
+                    );
+                    continue;
+                }
+                if let Some((pct, total, speed, eta)) = parse_progress_line(&prog_re, t) {
+                    emit_progress(
+                        &app_task,
+                        &ProgressEvent {
+                            id: id.clone(),
+                            percent: Some((pct * 10.0).round() / 10.0),
+                            total,
+                            speed,
+                            eta,
+                            status: "downloading".to_string(),
+                            detail: None,
+                        },
+                    );
+                    continue;
+                }
+                if t.starts_with("ERROR") {
+                    last_error_lines.push(t.to_string());
+                }
+            }
+        }
+
+        let stderr_tail = stderr_handle.await.unwrap_or_default();
+        if last_error_lines.is_empty() {
+            last_error_lines = stderr_tail
+                .into_iter()
+                .filter(|l| l.contains("ERROR"))
+                .collect();
+        }
+
+        let status = {
+            let mut guard = handle.lock().await;
+            guard.wait().await.ok()
+        };
+        let success = status.map(|s| s.success()).unwrap_or(false);
+        let was_cancelled = cancelled.load(Ordering::SeqCst);
+
+        // Release the slot so retries start clean.
+        if let Ok(mut map) = active_task.lock() {
+            map.remove(&id);
+        }
+        if was_cancelled {
+            let _ = app_task.emit("download-cancelled", DoneEvent { id: id.clone(), path: None });
+        } else if success {
+            let _ = app_task.emit(
+                "download-complete",
+                DoneEvent {
+                    id: id.clone(),
+                    path: final_path,
+                },
+            );
+        } else {
+            let error = last_error_lines
+                .last()
+                .cloned()
+                .unwrap_or_else(|| {
+                    status
+                        .map(|s| format!("yt-dlp exited with {s}"))
+                        .unwrap_or_else(|| "download failed".to_string())
+                });
+            let _ = app_task.emit(
+                "download-error",
+                FailEvent {
+                    id: id.clone(),
+                    error,
+                },
+            );
+        }
+    });
+
+    Ok(())
+}
+
+pub async fn cancel_download_impl(active: &ActiveMap, id: &str) -> Result<bool, String> {
+    let handle = {
+        let map = active.lock().map_err(|e| format!("lock: {e}"))?;
+        map.get(id).map(|a| (a.child.clone(), a.cancelled.clone()))
+    };
+    match handle {
+        Some((child, flag)) => {
+            flag.store(true, Ordering::SeqCst);
+            let mut guard = child.lock().await;
+            guard.kill().await.map_err(|e| format!("kill: {e}"))?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
