@@ -581,7 +581,18 @@ pub async fn start_download_impl(
         .unwrap_or_else(|| load_settings(&app).extra_args);
     let extra_list = sidecar::split_extra_args(&extra);
     args.extend(extra_list.clone());
-    let fragments = crate::settings::effective_fragments(&app);
+    // Fragment count: explicit user value wins; otherwise Auto measures the
+    // line fresh on every press (1 MB, ~a second) so the count tracks the
+    // network you're actually on — hotspot vs fibre, peak vs off-peak.
+    let fragments = match load_settings(&app).concurrent_fragments {
+        Some(n) => n.clamp(1, 16),
+        None => match crate::net::probe_now(&app).await {
+            Some(mbps) if mbps.is_finite() && mbps > 0.0 => {
+                crate::net::fragments_for_mbps(mbps)
+            }
+            _ => crate::settings::effective_fragments(&app),
+        },
+    };
     args.extend(default_fragment_args(&extra_list, fragments));
     args.push(req.url.clone());
 

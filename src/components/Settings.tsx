@@ -186,9 +186,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-zinc-600">
             {s.fragments == null ? (
               s.bandwidth?.mbps != null ? (
-                <>Auto · line measures {s.bandwidth.mbps.toFixed(0)} Mbps → {s.bandwidth.fragments} fragments{s.bandwidth.lastChecked ? ` · probed ${timeAgo(s.bandwidth.lastChecked)}` : ""}.</>
+                <>Auto-adjusted to {s.bandwidth.fragments} parallel connections · line measures {s.bandwidth.mbps.toFixed(0)} Mbps{s.bandwidth.lastChecked ? ` · checked ${timeAgo(s.bandwidth.lastChecked)}` : ""} · re-checked on every download.</>
               ) : (
-                <>Auto · measuring the line in the background, 4 until then.</>
+                <>Auto · measuring the line in the background, 4 connections until then.</>
               )
             ) : (
               <>{s.fragments} DASH/HLS parts fetched at once — higher uses more bandwidth.</>
