@@ -5,6 +5,7 @@
 //! UI, and keeps the engine fresh via the silent updater.
 
 mod downloads;
+mod net;
 mod settings;
 mod sidecar;
 mod updater;
@@ -45,6 +46,15 @@ fn save_settings(
     }
     if let Some(v) = patch.concurrent_fragments {
         current.concurrent_fragments = v;
+    }
+    if let Some(v) = patch.autofetch {
+        current.autofetch = v;
+    }
+    if let Some(v) = patch.last_speed_mbps {
+        current.last_speed_mbps = v;
+    }
+    if let Some(v) = patch.last_speed_check {
+        current.last_speed_check = v;
     }
     settings::save_settings(&app, &current)?;
     Ok(current)
@@ -106,8 +116,14 @@ async fn fetch_metadata(
     app: AppHandle,
     url: String,
     extra_args: Option<String>,
+    fetch_id: Option<String>,
 ) -> Result<downloads::VideoMetadata, String> {
-    downloads::fetch_metadata_impl(&app, url.trim(), extra_args).await
+    downloads::fetch_metadata_impl(&app, url.trim(), extra_args, fetch_id).await
+}
+
+#[tauri::command]
+async fn bandwidth_status(app: AppHandle) -> net::BandwidthStatus {
+    net::bandwidth_status(&app)
 }
 
 #[tauri::command]
@@ -146,6 +162,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 updater::auto_check_and_update(handle).await;
             });
+            // Bandwidth probe for Auto fragment parallelism, same deal.
+            let net_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                net::ensure_probed(&net_handle).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -160,6 +181,7 @@ pub fn run() {
             fetch_metadata,
             start_download,
             cancel_download,
+            bandwidth_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

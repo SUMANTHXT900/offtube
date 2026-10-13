@@ -76,6 +76,7 @@ export interface Settings {
   extra_args: string;
   last_engine_check?: number | null;
   concurrent_fragments?: number | null;
+  autofetch?: boolean | null;
 }
 
 export interface SettingsPatch {
@@ -84,6 +85,7 @@ export interface SettingsPatch {
   extra_args?: string;
   last_engine_check?: number | null;
   concurrent_fragments?: number | null;
+  autofetch?: boolean | null;
 }
 
 export interface EngineProgress {
@@ -116,6 +118,18 @@ export interface DoneEvent {
   path?: string | null;
 }
 
+export interface FetchProgress {
+  id: string;
+  stage: string;
+}
+
+export interface BandwidthStatus {
+  manual: boolean;
+  fragments: number;
+  mbps?: number | null;
+  lastChecked?: number | null;
+}
+
 export interface FailEvent {
   id: string;
   error: string;
@@ -137,8 +151,9 @@ export const api = {
     invoke<UpdateCheck>("check_engine_update", { preferNightly }),
   updateEngine: (preferNightly?: boolean) =>
     invoke<UpdateResult>("update_engine", { preferNightly }),
-  fetchMetadata: (url: string, extraArgs?: string | null) =>
-    invoke<VideoMetadata>("fetch_metadata", { url, extraArgs }),
+  fetchMetadata: (url: string, extraArgs?: string | null, fetchId?: string | null) =>
+    invoke<VideoMetadata>("fetch_metadata", { url, extraArgs, fetchId }),
+  bandwidthStatus: () => invoke<BandwidthStatus>("bandwidth_status"),
   startDownload: (req: StartRequest) =>
     invoke<void>("start_download", { req }),
   cancelDownload: (id: string) => invoke<boolean>("cancel_download", { id }),

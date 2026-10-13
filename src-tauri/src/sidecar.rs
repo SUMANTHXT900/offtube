@@ -155,6 +155,27 @@ pub fn augmented_path(app: &AppHandle) -> String {
     format!("{extra}{sep}{current}")
 }
 
+/// Kill a spawned tool with its whole process tree. On Windows a plain
+/// Child::kill leaves ffmpeg orphans behind once a merge has started, so the
+/// tree is torn down via taskkill and Child::kill is only the fallback.
+/// Never errors — callers treat cancel as fire-and-forget.
+pub async fn kill_child(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let res = tokio::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        if res.map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 fn base_command(program: &PathBuf) -> tokio::process::Command {
     let mut cmd = std::process::Command::new(program);
     // Don't flash a console window per spawn on Windows release builds.

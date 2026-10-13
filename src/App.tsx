@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { Queue } from "./components/Queue";
 import { EngineDot, SettingsPanel } from "./components/Settings";
 import { UrlBar } from "./components/UrlBar";
-import type { DoneEvent, EngineProgress, FailEvent, ProgressEvent } from "./lib/tauri";
+import type { DoneEvent, EngineProgress, FailEvent, FetchProgress, ProgressEvent } from "./lib/tauri";
 import { useQueue } from "./stores/useQueue";
 import { useSettings } from "./stores/useSettings";
 
@@ -41,6 +41,9 @@ export default function App() {
           qs.markCancelled(e.payload.id),
         ),
         await listen("engine-status", () => ss()),
+        await listen<FetchProgress>("fetch-progress", (e) =>
+          qs.applyFetchStage(e.payload.id, e.payload.stage),
+        ),
         await listen<EngineProgress>("engine-progress", (e) =>
           useSettings.getState().setEngineProgress(e.payload),
         ),

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, type EngineProgress, type EngineStatus, type UpdateCheck } from "../lib/tauri";
+import { api, type BandwidthStatus, type EngineProgress, type EngineStatus, type UpdateCheck } from "../lib/tauri";
 
 export const FRAGMENT_OPTIONS = [1, 2, 4, 8, 16] as const;
 export const DEFAULT_FRAGMENTS = 4;
@@ -8,7 +8,10 @@ interface SettingsState {
   downloadDir: string;
   preferNightly: boolean;
   extraArgs: string;
-  fragments: number;
+  /** Explicit fragment count, or null = Auto (speed-probed). */
+  fragments: number | null;
+  autofetch: boolean;
+  bandwidth: BandwidthStatus | null;
   engine: EngineStatus | null;
   engineProgress: EngineProgress | null;
   updateCheck: UpdateCheck | null;
@@ -20,7 +23,8 @@ interface SettingsState {
   pickDir: () => Promise<void>;
   setNightly: (v: boolean) => Promise<void>;
   setExtraArgs: (v: string) => Promise<void>;
-  setFragments: (v: number) => Promise<void>;
+  setFragments: (v: number | null) => Promise<void>;
+  setAutofetch: (v: boolean) => Promise<void>;
   checkUpdate: () => Promise<void>;
   runUpdate: () => Promise<void>;
   setEngineProgress: (p: EngineProgress | null) => void;
@@ -33,7 +37,9 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   downloadDir: "",
   preferNightly: false,
   extraArgs: "",
-  fragments: DEFAULT_FRAGMENTS,
+  fragments: null,
+  autofetch: true,
+  bandwidth: null,
   engine: null,
   engineProgress: null,
   updateCheck: null,
@@ -44,16 +50,19 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   load: async () => {
     set({ busy: "load" });
     try {
-      const [s, dir, engine] = await Promise.all([
+      const [s, dir, engine, bandwidth] = await Promise.all([
         api.getSettings(),
         api.getDownloadDir(),
         api.engineStatus(),
+        api.bandwidthStatus().catch(() => null),
       ]);
       set({
         downloadDir: s.download_dir ?? dir,
         preferNightly: s.prefer_nightly,
         extraArgs: s.extra_args ?? "",
-        fragments: s.concurrent_fragments ?? DEFAULT_FRAGMENTS,
+        fragments: s.concurrent_fragments ?? null,
+        autofetch: s.autofetch ?? true,
+        bandwidth,
         engine,
         loaded: true,
       });
@@ -96,9 +105,15 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   },
 
   setFragments: async (v) => {
-    const clamped = Math.min(16, Math.max(1, Math.round(v)));
+    const clamped = v == null ? null : Math.min(16, Math.max(1, Math.round(v)));
     set({ fragments: clamped });
     await api.saveSettings({ concurrent_fragments: clamped });
+    api.bandwidthStatus().then((b) => set({ bandwidth: b })).catch(() => {});
+  },
+
+  setAutofetch: async (v) => {
+    set({ autofetch: v });
+    await api.saveSettings({ autofetch: v });
   },
 
   checkUpdate: async () => {

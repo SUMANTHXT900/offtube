@@ -42,6 +42,8 @@ export interface QueueItem {
   detail?: string | null;
   outputPath?: string | null;
   error?: string | null;
+  /** Live extraction stage while fetching ("Reading player…"). */
+  stage?: string | null;
   createdAt: number;
 }
 
@@ -60,6 +62,7 @@ interface QueueState {
     id: string,
     p: { percent?: number | null; speed?: string | null; eta?: string | null; total?: string | null; status?: string; detail?: string | null },
   ) => void;
+  applyFetchStage: (id: string, stage: string) => void;
   markDone: (id: string, path?: string | null) => void;
   markFailed: (id: string, error: string) => void;
   markCancelled: (id: string) => void;
@@ -137,7 +140,7 @@ export const useQueue = create<QueueState>()(
       ],
     }));
     try {
-      const meta = await api.fetchMetadata(url);
+      const meta = await api.fetchMetadata(url, null, id);
       set((s) => ({
         items: s.items.map((it) => (it.id === id ? metaToItem(id, url, meta) : it)),
       }));
@@ -195,7 +198,10 @@ export const useQueue = create<QueueState>()(
 
   cancel: async (id: string) => {
     try {
-      await api.cancelDownload(id);
+      // Optimistic: flip the row instantly so Stop always feels alive;
+      // the download-cancelled event confirms (idempotent).
+      const stopped = await api.cancelDownload(id);
+      if (stopped) get().markCancelled(id);
     } catch {
       // The task may already have exited; the terminal event still lands.
     }
@@ -226,6 +232,13 @@ export const useQueue = create<QueueState>()(
           detail: p.detail ?? it.detail,
         };
       }),
+    })),
+
+  applyFetchStage: (id, stage) =>
+    set((s) => ({
+      items: s.items.map((it) =>
+        it.id === id && it.status === "fetching" ? { ...it, stage } : it,
+      ),
     })),
 
   markDone: (id, path) =>

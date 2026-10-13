@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { timeAgo } from "../lib/format";
-import { DEFAULT_FRAGMENTS, FRAGMENT_OPTIONS, useSettings } from "../stores/useSettings";
+import { FRAGMENT_OPTIONS, useSettings } from "../stores/useSettings";
 
 export function EngineDot() {
   const engine = useSettings((s) => s.engine);
@@ -157,6 +157,17 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           <div className="mt-3 flex items-center justify-between">
             <span className="text-[12px] text-zinc-400">Parallel fragments</span>
             <div className="flex gap-1 rounded-lg bg-zinc-900/80 p-1">
+              <button
+                onClick={() => s.setFragments(null)}
+                title="Measure the line once a day and pick the count automatically"
+                className={`rounded-md px-2 py-1 font-mono text-[11px] transition ${
+                  s.fragments == null
+                    ? "bg-zinc-700 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                Auto
+              </button>
               {FRAGMENT_OPTIONS.map((n) => (
                 <button
                   key={n}
@@ -173,9 +184,26 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             </div>
           </div>
           <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-zinc-600">
-            DASH/HLS parts fetched at once. {DEFAULT_FRAGMENTS} saturates most lines; raise it for
-            gigabit or 2GB+ files.
+            {s.fragments == null ? (
+              s.bandwidth?.mbps != null ? (
+                <>Auto · line measures {s.bandwidth.mbps.toFixed(0)} Mbps → {s.bandwidth.fragments} fragments{s.bandwidth.lastChecked ? ` · probed ${timeAgo(s.bandwidth.lastChecked)}` : ""}.</>
+              ) : (
+                <>Auto · measuring the line in the background, 4 until then.</>
+              )
+            ) : (
+              <>{s.fragments} DASH/HLS parts fetched at once — higher uses more bandwidth.</>
+            )}
           </p>
+
+          <div className="mt-3 flex items-center justify-between gap-3 border-t border-zinc-800/80 pt-3">
+            <div>
+              <p className="text-[12px] text-zinc-300">Fetch on paste</p>
+              <p className="font-mono text-[10px] leading-snug text-zinc-600">
+                start resolving as soon as a link is pasted
+              </p>
+            </div>
+            <Switch on={s.autofetch} onFlip={() => s.setAutofetch(!s.autofetch)} label="Fetch on paste" />
+          </div>
         </Section>
 
         {/* ------------------------------------------------ engine */}
@@ -356,8 +384,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         <div className="flex items-center gap-2 rounded-xl border border-zinc-800/70 px-3.5 py-3">
           <Gauge size={13} className="shrink-0 text-zinc-600" />
           <p className="font-mono text-[10px] leading-relaxed text-zinc-600">
-            Fragment downloads run {s.fragments}-way parallel; the engine re-checks itself at
-            most once a day.
+            Fragment downloads run {(s.bandwidth?.fragments ?? s.fragments ?? 4)}-way
+            parallel; the engine re-checks itself at most once a day.
           </p>
         </div>
       </div>

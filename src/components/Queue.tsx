@@ -284,6 +284,28 @@ function QualityPicker({ item }: { item: QueueItem }) {
   );
 }
 
+function FetchingSkeleton({ item }: { item: QueueItem }) {
+  return (
+    <div className="min-w-0 flex-1" aria-live="polite">
+      <div className="h-4 w-3/4 animate-pulse rounded bg-zinc-800" />
+      <div className="mt-2 h-3 w-1/2 animate-pulse rounded bg-zinc-800/70" />
+      <div className="mt-2.5 space-y-1.5">
+        {[92, 78, 64].map((w) => (
+          <div
+            key={w}
+            className="h-7 animate-pulse rounded-lg bg-zinc-800/50"
+            style={{ width: `${w}%` }}
+          />
+        ))}
+      </div>
+      <p className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-zinc-400">
+        <Loader2 size={12} className="animate-spin text-emerald-300" />
+        {item.stage ?? "Starting fetch…"}
+      </p>
+    </div>
+  );
+}
+
 function QueueRow({ item }: { item: QueueItem }) {
   const enqueue = useQueue((s) => s.enqueue);
   const cancel = useQueue((s) => s.cancel);
@@ -318,10 +340,13 @@ function QueueRow({ item }: { item: QueueItem }) {
         </div>
 
         {/* body */}
+        {item.status === "fetching" ? (
+          <FetchingSkeleton item={item} />
+        ) : (
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <p className="truncate text-[13px] font-medium text-zinc-100" title={item.title ?? item.url}>
-              {item.status === "fetching" ? "Resolving…" : (item.title ?? item.url)}
+              {item.title ?? item.url}
             </p>
             <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-zinc-600">
               {item.status}
@@ -344,6 +369,7 @@ function QueueRow({ item }: { item: QueueItem }) {
             </p>
           )}
         </div>
+        )}
 
         {/* actions */}
         <div className="flex shrink-0 flex-col items-end justify-between gap-2">
@@ -365,21 +391,27 @@ function QueueRow({ item }: { item: QueueItem }) {
               </button>
             )}
             {(item.status === "error" || item.status === "cancelled") && (
-              <button
-                onClick={() => {
-                  if (!item.title) {
+              item.title ? (
+                <button
+                  onClick={() => enqueue(item.id)}
+                  title="Resume from where it stopped (--continue)"
+                  className="flex items-center gap-1 rounded-md bg-emerald-400 px-2.5 py-1 text-[12px] font-semibold text-zinc-950 transition hover:bg-emerald-300"
+                >
+                  <Download size={13} /> resume
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
                     const url = item.url;
                     remove(item.id);
                     fetchUrl(url);
-                  } else {
-                    enqueue(item.id);
-                  }
-                }}
-                title={item.title ? "Retry / resume download" : "Retry fetch"}
-                className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                <RotateCcw size={15} />
-              </button>
+                  }}
+                  title="Retry fetch"
+                  className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100"
+                >
+                  <RotateCcw size={15} />
+                </button>
+              )
             )}
             {active ? (
               <button

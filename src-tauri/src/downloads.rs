@@ -252,6 +252,31 @@ fn map_format(f: &serde_json::Value, duration: Option<u64>) -> Option<FormatInfo
 /// metadata fetch: they would silently filter the dumped format list, so the
 /// picker would show a subset as if it were everything. Strip them (and their
 /// values) from user passthrough args on the `-J` path only.
+/// Human stage text for yt-dlp status lines, so the UI stays alive during
+/// the extraction phase when no percent exists yet (webpage + player API
+/// reads can take 5–15s of apparent "0%").
+fn friendly_stage(line: &str) -> Option<String> {
+    let t = line.trim();
+    let body = t
+        .strip_prefix("[youtube]")
+        .map(str::trim)
+        .or_else(|| t.strip_prefix("[info]").map(str::trim))
+        .or_else(|| t.strip_prefix("[generic]").map(str::trim))?;
+    if body.contains("Downloading webpage") {
+        Some("Contacting YouTube…".to_string())
+    } else if body.contains("player API JSON") {
+        Some("Reading player…".to_string())
+    } else if body.contains("m3u8") {
+        Some("Reading streams…".to_string())
+    } else if body.contains("format(s)") {
+        Some("Starting download…".to_string())
+    } else if body.contains("Downloading") && body.len() < 160 {
+        Some(body.to_string())
+    } else {
+        None
+    }
+}
+
 fn strip_selection_args(args: &[String]) -> Vec<String> {
     const WITH_VALUE: &[&str] = &[
         "-f", "--format",
@@ -285,10 +310,18 @@ fn strip_selection_args(args: &[String]) -> Vec<String> {
     out
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchProgress {
+    pub id: String,
+    pub stage: String,
+}
+
 pub async fn fetch_metadata_impl(
     app: &AppHandle,
     url: &str,
     extra_args: Option<String>,
+    fetch_id: Option<String>,
 ) -> Result<VideoMetadata, String> {
     let mut args = vec![
         "--no-playlist".to_string(),
@@ -297,6 +330,9 @@ pub async fn fetch_metadata_impl(
         "--no-progress".to_string(),
         "--socket-timeout".to_string(),
         "20".to_string(),
+        // Verbose keeps stdout pure JSON (verified) while stderr carries the
+        // extraction chatter we stream as live stages.
+        "--verbose".to_string(),
     ];
     let extra = extra_args
         .filter(|s| !s.trim().is_empty())
@@ -305,31 +341,99 @@ pub async fn fetch_metadata_impl(
     args.extend(sidecar::engine_wiring_args(app));
     args.push(url.to_string());
 
-    let fut = sidecar::run_tool_capture(app, TOOL_YTDLP, &args);
-    let out = tokio::time::timeout(std::time::Duration::from_secs(90), fut)
-        .await
-        .map_err(|_| "metadata fetch timed out (network slow?)".to_string())?
-        .map_err(|e| e)?;
+    let mut child = sidecar::spawn_tool(app, TOOL_YTDLP, &args)?;
+    let pid = child.id();
+    let stdout = child.stdout.take().map(BufReader::new);
+    let stderr = child.stderr.take();
 
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let msg = if err.is_empty() {
-            format!("yt-dlp exited with {}", out.status)
-        } else {
-            // Surface the last meaningful line (yt-dlp prefixes with ERROR:).
-            err.lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or(&err)
-                .trim()
-                .to_string()
-        };
+    // Drain stderr: stream extraction stages, keep a tail for error reports.
+    let app_err = app.clone();
+    let fid_err = fetch_id.clone();
+    let err_task = tokio::spawn(async move {
+        let mut tail: Vec<String> = Vec::new();
+        if let Some(s) = stderr {
+            let mut r = BufReader::new(s).lines();
+            while let Ok(Some(line)) = r.next_line().await {
+                let t = line.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if let (Some(fid), Some(stage)) =
+                    (fid_err.as_ref(), friendly_stage(t))
+                {
+                    let _ = app_err.emit(
+                        "fetch-progress",
+                        FetchProgress {
+                            id: fid.clone(),
+                            stage,
+                        },
+                    );
+                }
+                tail.push(t.to_string());
+                if tail.len() > 30 {
+                    tail.remove(0);
+                }
+            }
+        }
+        tail
+    });
+
+    // Accumulate stdout (the JSON document).
+    let out_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        if let Some(s) = stdout {
+            let mut r = BufReader::new(s);
+            let _ = r.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
+    let joined = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        async {
+            let buf = out_task.await.unwrap_or_default();
+            let tail = err_task.await.unwrap_or_default();
+            let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
+            Ok::<_, String>((buf, tail, status))
+        },
+    )
+    .await;
+    let (buf, tail, status) = match joined {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            // Timed out: tear the tree down so nothing lingers.
+            #[cfg(windows)]
+            if let Some(pid) = pid {
+                let _ = tokio::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await;
+            }
+            return Err("metadata fetch timed out (network slow?)".to_string());
+        }
+    };
+
+    if !status.success() {
+        let msg = tail
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("yt-dlp exited with {status}"));
+        // Surface the last meaningful line (yt-dlp prefixes with ERROR:).
         return Err(msg);
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = String::from_utf8_lossy(&buf);
+    let doc = text.trim();
+    let json = &doc[doc.find('{').unwrap_or(0)..];
     let v: serde_json::Value =
-        serde_json::from_str(&stdout).map_err(|e| format!("metadata parse: {e}"))?;
+        serde_json::from_str(json).map_err(|e| format!("metadata parse: {e}"))?;
 
     if v.get("_type").and_then(|t| t.as_str()) == Some("playlist") {
         return Err("playlists land in v0.2 — paste a single video URL for now".to_string());
@@ -600,6 +704,22 @@ pub async fn start_download_impl(
                     );
                     continue;
                 }
+                // Extraction chatter ([youtube]/[info]) → live stage text.
+                if let Some(stage) = friendly_stage(t) {
+                    emit_progress(
+                        &app_task,
+                        &ProgressEvent {
+                            id: id.clone(),
+                            percent: None,
+                            total: None,
+                            speed: None,
+                            eta: None,
+                            status: "downloading".to_string(),
+                            detail: Some(stage),
+                        },
+                    );
+                    continue;
+                }
                 if t.starts_with("ERROR") {
                     last_error_lines.push(t.to_string());
                 }
@@ -621,9 +741,17 @@ pub async fn start_download_impl(
         let success = status.map(|s| s.success()).unwrap_or(false);
         let was_cancelled = cancelled.load(Ordering::SeqCst);
 
-        // Release the slot so retries start clean.
+        // Release the slot so retries start clean — but only if the entry is
+        // still ours. Cancel removes the entry up front; a retry racing the
+        // old task's exit must not have its fresh entry deleted here.
         if let Ok(mut map) = active_task.lock() {
-            map.remove(&id);
+            let ours = map
+                .get(&id)
+                .map(|a| Arc::ptr_eq(&a.child, &handle))
+                .unwrap_or(false);
+            if ours {
+                map.remove(&id);
+            }
         }
         if was_cancelled {
             let _ = app_task.emit("download-cancelled", DoneEvent { id: id.clone(), path: None });
@@ -658,19 +786,20 @@ pub async fn start_download_impl(
 }
 
 pub async fn cancel_download_impl(active: &ActiveMap, id: &str) -> Result<bool, String> {
-    let handle = {
-        let map = active.lock().map_err(|e| format!("lock: {e}"))?;
-        map.get(id).map(|a| (a.child.clone(), a.cancelled.clone()))
-    };
-    match handle {
-        Some((child, flag)) => {
-            flag.store(true, Ordering::SeqCst);
-            let mut guard = child.lock().await;
-            guard.kill().await.map_err(|e| format!("kill: {e}"))?;
-            Ok(true)
+    // Take the entry out of the map first so a retry can start immediately
+    // even while the old process is still dying.
+    let entry = {
+        let mut map = active.lock().map_err(|e| format!("lock: {e}"))?;
+        match map.remove(id) {
+            Some(a) => (a.child.clone(), a.cancelled.clone()),
+            None => return Ok(false),
         }
-        None => Ok(false),
-    }
+    };
+    let (child, flag) = entry;
+    flag.store(true, Ordering::SeqCst);
+    let mut guard = child.lock().await;
+    sidecar::kill_child(&mut guard).await;
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -29,6 +29,14 @@ pub struct Settings {
     /// DASH/HLS fragments downloaded at once. None = 4 (app default).
     #[serde(default)]
     pub concurrent_fragments: Option<u32>,
+    /// Fetch metadata as soon as a link is pasted. None = true.
+    #[serde(default)]
+    pub autofetch: Option<bool>,
+    /// Cached bandwidth probe (see net.rs): measured Mbps + unix time.
+    #[serde(default)]
+    pub last_speed_mbps: Option<f64>,
+    #[serde(default)]
+    pub last_speed_check: Option<i64>,
 }
 
 impl Default for Settings {
@@ -39,6 +47,9 @@ impl Default for Settings {
             extra_args: String::new(),
             last_engine_check: None,
             concurrent_fragments: None,
+            autofetch: None,
+            last_speed_mbps: None,
+            last_speed_check: None,
         }
     }
 }
@@ -50,6 +61,9 @@ pub struct SettingsPatch {
     pub extra_args: Option<String>,
     pub last_engine_check: Option<Option<i64>>,
     pub concurrent_fragments: Option<Option<u32>>,
+    pub autofetch: Option<Option<bool>>,
+    pub last_speed_mbps: Option<Option<f64>>,
+    pub last_speed_check: Option<Option<i64>>,
 }
 
 pub fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -90,13 +104,21 @@ pub fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String>
     }
 }
 
-/// Effective fragment parallelism: user setting clamped to 1..=16, else 4.
+/// Effective fragment parallelism: explicit user value clamped to 1..=16,
+/// else the cached Auto probe, else 4.
 pub fn effective_fragments(app: &AppHandle) -> u32 {
-    load_settings(app)
-        .concurrent_fragments
-        .unwrap_or(4)
-        .clamp(1, 16)
+    let s = load_settings(app);
+    if let Some(n) = s.concurrent_fragments {
+        return n.clamp(1, 16);
+    }
+    if let Some(mbps) = s.last_speed_mbps {
+        if mbps.is_finite() && mbps > 0.0 {
+            return crate::net::fragments_for_mbps(mbps);
+        }
+    }
+    4
 }
+
 /// Default download location: ~/Videos/Offtube, falling back to ~/Downloads/Offtube.
 pub fn default_download_dir() -> String {
     let base = dirs::video_dir()
