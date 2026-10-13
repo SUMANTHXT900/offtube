@@ -392,6 +392,25 @@ fn strip_quotes(s: &str) -> String {
     }
 }
 
+/// yt-dlp downloads DASH/HLS fragments sequentially unless told otherwise
+/// (`-N` defaults to 1). For an offline-first downloader pulling GB-scale
+/// merges, fragment parallelism is the main bandwidth lever — single-file
+/// progressive streams are the only case it can't help (those need an
+/// external downloader like aria2c; future work, not a new sidecar today).
+/// Returns the default flags unless the user already tuned `-N` themselves.
+fn default_fragment_args(extra: &[String]) -> Vec<String> {
+    let tuned = extra.iter().any(|a| {
+        a == "-N"
+            || a == "--concurrent-fragments"
+            || a.starts_with("--concurrent-fragments=")
+    });
+    if tuned {
+        Vec::new()
+    } else {
+        vec!["--concurrent-fragments".to_string(), "4".to_string()]
+    }
+}
+
 pub async fn start_download_impl(
     app: AppHandle,
     active: Arc<ActiveMap>,
@@ -449,7 +468,9 @@ pub async fn start_download_impl(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| load_settings(&app).extra_args);
-    args.extend(sidecar::split_extra_args(&extra));
+    let extra_list = sidecar::split_extra_args(&extra);
+    args.extend(extra_list.clone());
+    args.extend(default_fragment_args(&extra_list));
     args.push(req.url.clone());
 
     let child = sidecar::spawn_tool(&app, TOOL_YTDLP, &args)?;
@@ -694,6 +715,23 @@ mod tests {
         assert_eq!(f.abr, None);
         assert_eq!(f.dynamic_range.as_deref(), Some("HDR10"));
         assert!(f.is_video && !f.is_audio);
+    }
+
+    #[test]
+    fn fragment_parallelism_default_and_override() {
+        let empty: Vec<String> = vec![];
+        assert_eq!(
+            default_fragment_args(&empty),
+            vec!["--concurrent-fragments".to_string(), "4".to_string()]
+        );
+        for tuned in [
+            vec!["-N", "8"],
+            vec!["--concurrent-fragments", "8"],
+            vec!["--concurrent-fragments=8"],
+        ] {
+            let args: Vec<String> = tuned.iter().map(|s| s.to_string()).collect();
+            assert!(default_fragment_args(&args).is_empty(), "{tuned:?}");
+        }
     }
 
     #[test]

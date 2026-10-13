@@ -16,6 +16,7 @@ export type ItemStatus =
  *  'best' | 'h:1080' | 'audio:original' | 'audio:mp3' | 'custom:<formatId>'
  */
 export type SelKey = string;
+export type PickerMode = "video" | "audio";
 
 export interface QueueItem {
   id: string;
@@ -27,7 +28,11 @@ export interface QueueItem {
   duration?: number | null;
   viewCount?: number | null;
   formats: FormatInfo[];
-  selKey: SelKey;
+  /** Picker mode. Each mode remembers its own key, so flipping
+   *  Video ↔ Audio never loses the other side's choice. */
+  mode: PickerMode;
+  videoKey: SelKey;
+  audioKey: SelKey;
   audioOnly: boolean;
   progress: number | null;
   speed?: string | null;
@@ -42,7 +47,10 @@ export interface QueueItem {
 interface QueueState {
   items: QueueItem[];
   fetchUrl: (url: string) => Promise<void>;
+  /** Write the key into the item's *active* mode bucket. */
   setSelKey: (id: string, key: SelKey) => void;
+  /** Flip Video ↔ Audio. Each mode keeps its own key. */
+  setMode: (id: string, mode: PickerMode) => void;
   enqueue: (id: string) => Promise<void>;
   cancel: (id: string) => Promise<void>;
   remove: (id: string) => void;
@@ -60,15 +68,30 @@ let seq = 0;
 const nextId = () =>
   `q_${Date.now().toString(36)}_${(seq++).toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 
-/** Default key: best ladder row, else first available video row, else audio. */
-export function defaultSelKey(meta: Pick<VideoMetadata, "formats" | "duration">): SelKey {
+/** Default keys: video starts at Best, audio at Original. */
+export function defaultKeys(meta: Pick<VideoMetadata, "formats" | "duration">): {
+  mode: PickerMode;
+  videoKey: SelKey;
+  audioKey: SelKey;
+} {
   const ladder = buildLadder(meta.formats, meta.duration);
-  if (ladder.videoRows.length > 0) return "best";
-  if (ladder.audioRows.length > 0) return "audio:original";
-  return "best";
+  return {
+    mode: "video",
+    videoKey: "best",
+    audioKey:
+      ladder.audioRows.find((r) => r.key === "audio:original")?.key ??
+      ladder.audioRows[0]?.key ??
+      "audio:original",
+  };
+}
+
+/** The currently effective selection key for an item. */
+export function activeKey(item: Pick<QueueItem, "mode" | "videoKey" | "audioKey">): SelKey {
+  return item.mode === "video" ? item.videoKey : item.audioKey;
 }
 
 function metaToItem(id: string, url: string, meta: VideoMetadata): QueueItem {
+  const keys = defaultKeys(meta);
   return {
     id,
     url: meta.webpageUrl || url,
@@ -79,7 +102,7 @@ function metaToItem(id: string, url: string, meta: VideoMetadata): QueueItem {
     duration: meta.duration,
     viewCount: meta.viewCount,
     formats: meta.formats,
-    selKey: defaultSelKey(meta),
+    ...keys,
     audioOnly: false,
     progress: null,
     createdAt: Date.now(),
@@ -100,7 +123,9 @@ export const useQueue = create<QueueState>()((set, get) => ({
           url,
           status: "fetching",
           formats: [],
-          selKey: "best",
+          mode: "video",
+          videoKey: "best",
+          audioKey: "audio:original",
           audioOnly: false,
           progress: null,
           createdAt: Date.now(),
@@ -123,17 +148,28 @@ export const useQueue = create<QueueState>()((set, get) => ({
     }
   },
 
-  setSelKey: (id, selKey) =>
+  setSelKey: (id, key) =>
     set((s) => ({
-      items: s.items.map((it) =>
-        it.id === id ? { ...it, selKey, audioOnly: selKey === "audio:mp3" } : it,
-      ),
+      items: s.items.map((it) => {
+        if (it.id !== id) return it;
+        const next = it.mode === "video" ? { videoKey: key } : { audioKey: key };
+        return { ...it, ...next, audioOnly: key === "audio:mp3" };
+      }),
+    })),
+
+  setMode: (id, mode) =>
+    set((s) => ({
+      items: s.items.map((it) => {
+        if (it.id !== id) return it;
+        const key = mode === "video" ? it.videoKey : it.audioKey;
+        return { ...it, mode, audioOnly: key === "audio:mp3" };
+      }),
     })),
 
   enqueue: async (id: string) => {
     const item = get().items.find((i) => i.id === id);
     if (!item || item.status === "downloading" || item.status === "merging") return;
-    const { selector, audioOnly } = selectorForKey(item.selKey, item.formats);
+    const { selector, audioOnly } = selectorForKey(activeKey(item), item.formats);
     set((s) => ({
       items: s.items.map((it) =>
         it.id === id

@@ -16,7 +16,7 @@ import { useMemo, useState } from "react";
 import { fmtBytes, fmtCount, fmtDuration, shortCodec } from "../lib/format";
 import { buildLadder, type LadderAudioRow, type LadderVideoRow } from "../lib/ladder";
 import { api } from "../lib/tauri";
-import { useQueue, type QueueItem } from "../stores/useQueue";
+import { activeKey, useQueue, type QueueItem } from "../stores/useQueue";
 
 function StatusLine({ item }: { item: QueueItem }) {
   const cls = "font-mono text-[11px] tabular text-zinc-500";
@@ -141,12 +141,25 @@ function AudioRow({
 function QualityPicker({ item }: { item: QueueItem }) {
   const [showAll, setShowAll] = useState(false);
   const setSelKey = useQueue((s) => s.setSelKey);
+  const setMode = useQueue((s) => s.setMode);
   const ladder = useMemo(
     () => buildLadder(item.formats, item.duration),
     [item.formats, item.duration],
   );
+  const key = activeKey(item);
+  const video = item.mode === "video";
+  // The expander follows the mode: video lists video formats, audio lists audio-only.
+  const allList = useMemo(
+    () =>
+      video
+        ? ladder.allSorted.filter((f) => f.isVideo)
+        : ladder.allSorted.filter((f) => !f.isVideo && f.isAudio),
+    [ladder, video],
+  );
+  const hasVideo = ladder.videoRows.length > 0;
+  const hasAudio = ladder.audioRows.length > 0;
 
-  if (ladder.videoRows.length === 0 && ladder.audioRows.length === 0) {
+  if (!hasVideo && !hasAudio) {
     return (
       <p className="mt-2 font-mono text-[11px] text-amber-300/90">
         no downloadable formats listed — the video may be DRM-protected or members-only
@@ -156,7 +169,30 @@ function QualityPicker({ item }: { item: QueueItem }) {
 
   return (
     <div className="mt-1.5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-1.5">
-      {ladder.videoRows.length > 0 && (
+      {/* mode switch — free to flip until the download starts; each mode keeps its pick */}
+      <div className="mb-1 flex gap-1 rounded-lg bg-zinc-900/80 p-1">
+        {(
+          [
+            { m: "video", label: `Video · ${ladder.videoRows.length}`, enabled: hasVideo },
+            { m: "audio", label: `Audio · ${ladder.audioRows.length}`, enabled: hasAudio },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.m}
+            disabled={!t.enabled}
+            onClick={() => setMode(item.id, t.m)}
+            className={`flex-1 rounded-md px-2 py-1 font-mono text-[11px] transition ${
+              video === (t.m === "video")
+                ? "bg-zinc-700 text-zinc-100"
+                : "text-zinc-500 hover:text-zinc-300"
+            } disabled:cursor-not-allowed disabled:opacity-40`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {video ? (
         <>
           <p className="px-2 pb-1 pt-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">
             video · merged, includes audio
@@ -165,23 +201,21 @@ function QualityPicker({ item }: { item: QueueItem }) {
             <VideoRow
               key={row.key}
               row={row}
-              selected={item.selKey === row.key}
+              selected={key === row.key}
               onPick={() => setSelKey(item.id, row.key)}
             />
           ))}
         </>
-      )}
-      {ladder.audioRows.length > 0 && (
+      ) : (
         <>
-          <div className="mx-2 my-1.5 border-t border-zinc-800/80" />
-          <p className="px-2 pb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">
+          <p className="px-2 pb-1 pt-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">
             audio · no video
           </p>
           {ladder.audioRows.map((row) => (
             <AudioRow
               key={row.key}
               row={row}
-              selected={item.selKey === row.key}
+              selected={key === row.key}
               onPick={() => setSelKey(item.id, row.key)}
             />
           ))}
@@ -191,7 +225,7 @@ function QualityPicker({ item }: { item: QueueItem }) {
         onClick={() => setShowAll((v) => !v)}
         className="mt-1 flex w-full items-center gap-1 rounded-md px-2 py-1 font-mono text-[11px] text-zinc-500 transition hover:bg-zinc-800/70 hover:text-zinc-200"
       >
-        all {ladder.allSorted.length} formats
+        all {allList.length} {video ? "video" : "audio"} formats
         <ChevronDown size={13} className={`transition-transform ${showAll ? "rotate-180" : ""}`} />
       </button>
       {showAll && (
@@ -209,9 +243,9 @@ function QualityPicker({ item }: { item: QueueItem }) {
               </tr>
             </thead>
             <tbody>
-              {ladder.allSorted.map((f) => {
-                const key = `custom:${f.formatId}`;
-                const selected = item.selKey === key;
+              {allList.map((f) => {
+                const ckey = `custom:${f.formatId}`;
+                const selected = key === ckey;
                 const res =
                   f.height != null
                     ? `${f.height}p${f.fps != null && f.fps >= 48 ? Math.round(f.fps) : ""}`
@@ -219,7 +253,7 @@ function QualityPicker({ item }: { item: QueueItem }) {
                 return (
                   <tr
                     key={f.formatId}
-                    onClick={() => setSelKey(item.id, key)}
+                    onClick={() => setSelKey(item.id, ckey)}
                     className={`cursor-pointer border-t border-zinc-800/60 transition-colors ${
                       selected ? "bg-emerald-400/10 text-emerald-200" : "text-zinc-400 hover:bg-zinc-800/60"
                     }`}
