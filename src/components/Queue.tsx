@@ -12,10 +12,11 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useState } from "react";
-import { fmtBytes, fmtCount, fmtDuration } from "../lib/format";
+import { useMemo, useState } from "react";
+import { fmtBytes, fmtCount, fmtDuration, shortCodec } from "../lib/format";
+import { buildLadder, type LadderAudioRow, type LadderVideoRow } from "../lib/ladder";
 import { api } from "../lib/tauri";
-import { PRESETS, useQueue, type QueueItem } from "../stores/useQueue";
+import { useQueue, type QueueItem } from "../stores/useQueue";
 
 function StatusLine({ item }: { item: QueueItem }) {
   const cls = "font-mono text-[11px] tabular text-zinc-500";
@@ -52,56 +53,204 @@ function StatusLine({ item }: { item: QueueItem }) {
   }
 }
 
-function FormatTable({ item }: { item: QueueItem }) {
-  const setCustom = useQueue((s) => s.setCustomFormat);
-  const video = item.formats.filter((f) => f.isVideo);
-  const audioOnly = item.formats.filter((f) => !f.isVideo && f.isAudio);
-  const rows = [...video.slice(0, 24), ...audioOnly.slice(0, 8)];
+function Radio({ on }: { on: boolean }) {
+  return (
+    <span
+      className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border transition-colors ${
+        on ? "border-emerald-300" : "border-zinc-700"
+      }`}
+    >
+      {on && <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />}
+    </span>
+  );
+}
+
+function VideoRow({
+  row,
+  selected,
+  onPick,
+}: {
+  row: LadderVideoRow;
+  selected: boolean;
+  onPick: () => void;
+}) {
+  const detail = [
+    row.vcodec ? shortCodec(row.vcodec) : "auto",
+    row.acodec ? shortCodec(row.acodec) : row.key === "best" ? "best audio" : null,
+    row.key === "best" ? null : row.merged ? "merged" : "progressive",
+    row.key === "best" ? "merged → mp4" : "→ mp4",
+    row.hdr ? "HDR" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <button
+      onClick={onPick}
+      className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
+        selected ? "bg-emerald-400/10" : "hover:bg-zinc-800/70"
+      }`}
+    >
+      <Radio on={selected} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline justify-between gap-2">
+          <span className={`text-[13px] font-medium ${selected ? "text-emerald-200" : "text-zinc-100"}`}>
+            {row.label}
+          </span>
+          <span className="shrink-0 font-mono text-[11px] tabular text-zinc-300">
+            {row.size != null ? fmtBytes(row.size, row.approx) : "—"}
+          </span>
+        </span>
+        <span className="block truncate font-mono text-[11px] text-zinc-500">{detail}</span>
+      </span>
+    </button>
+  );
+}
+
+function AudioRow({
+  row,
+  selected,
+  onPick,
+}: {
+  row: LadderAudioRow;
+  selected: boolean;
+  onPick: () => void;
+}) {
+  return (
+    <button
+      onClick={onPick}
+      className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
+        selected ? "bg-emerald-400/10" : "hover:bg-zinc-800/70"
+      }`}
+    >
+      <Radio on={selected} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline justify-between gap-2">
+          <span className={`text-[13px] font-medium ${selected ? "text-emerald-200" : "text-zinc-100"}`}>
+            {row.label}
+          </span>
+          <span className="shrink-0 font-mono text-[11px] tabular text-zinc-300">
+            {row.size != null ? fmtBytes(row.size, row.approx) : "—"}
+          </span>
+        </span>
+        <span className="block truncate font-mono text-[11px] text-zinc-500">{row.detail}</span>
+      </span>
+    </button>
+  );
+}
+
+function QualityPicker({ item }: { item: QueueItem }) {
+  const [showAll, setShowAll] = useState(false);
+  const setSelKey = useQueue((s) => s.setSelKey);
+  const ladder = useMemo(
+    () => buildLadder(item.formats, item.duration),
+    [item.formats, item.duration],
+  );
+
+  if (ladder.videoRows.length === 0 && ladder.audioRows.length === 0) {
+    return (
+      <p className="mt-2 font-mono text-[11px] text-amber-300/90">
+        no downloadable formats listed — the video may be DRM-protected or members-only
+      </p>
+    );
+  }
 
   return (
-    <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-zinc-800">
-      <table className="w-full font-mono text-[11px]">
-        <thead className="sticky top-0 bg-zinc-950 text-left text-zinc-500">
-          <tr>
-            <th className="px-2 py-1.5 font-medium">id</th>
-            <th className="px-2 py-1.5 font-medium">ext</th>
-            <th className="px-2 py-1.5 font-medium">res</th>
-            <th className="px-2 py-1.5 font-medium">codecs</th>
-            <th className="px-2 py-1.5 text-right font-medium">size</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((f) => {
-            const selected = item.presetId === "custom" && item.customFormatId === f.formatId;
-            return (
-              <tr
-                key={f.formatId}
-                onClick={() => setCustom(item.id, f.formatId)}
-                className={`cursor-pointer border-t border-zinc-800/60 transition-colors ${
-                  selected ? "bg-emerald-400/10 text-emerald-200" : "text-zinc-400 hover:bg-zinc-800/60"
-                }`}
-              >
-                <td className="px-2 py-1">{f.formatId}</td>
-                <td className="px-2 py-1">{f.ext}</td>
-                <td className="px-2 py-1 tabular">{f.resolution ?? (f.isAudio ? "audio" : "—")}</td>
-                <td className="px-2 py-1 text-zinc-500">
-                  {[f.vcodec === "none" ? null : f.vcodec, f.acodec === "none" ? null : f.acodec]
-                    .filter(Boolean)
-                    .join(" + ") || "—"}
-                </td>
-                <td className="px-2 py-1 text-right tabular">{fmtBytes(f.filesize)}</td>
+    <div className="mt-1.5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-1.5">
+      {ladder.videoRows.length > 0 && (
+        <>
+          <p className="px-2 pb-1 pt-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">
+            video · merged, includes audio
+          </p>
+          {ladder.videoRows.map((row) => (
+            <VideoRow
+              key={row.key}
+              row={row}
+              selected={item.selKey === row.key}
+              onPick={() => setSelKey(item.id, row.key)}
+            />
+          ))}
+        </>
+      )}
+      {ladder.audioRows.length > 0 && (
+        <>
+          <div className="mx-2 my-1.5 border-t border-zinc-800/80" />
+          <p className="px-2 pb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-600">
+            audio · no video
+          </p>
+          {ladder.audioRows.map((row) => (
+            <AudioRow
+              key={row.key}
+              row={row}
+              selected={item.selKey === row.key}
+              onPick={() => setSelKey(item.id, row.key)}
+            />
+          ))}
+        </>
+      )}
+      <button
+        onClick={() => setShowAll((v) => !v)}
+        className="mt-1 flex w-full items-center gap-1 rounded-md px-2 py-1 font-mono text-[11px] text-zinc-500 transition hover:bg-zinc-800/70 hover:text-zinc-200"
+      >
+        all {ladder.allSorted.length} formats
+        <ChevronDown size={13} className={`transition-transform ${showAll ? "rotate-180" : ""}`} />
+      </button>
+      {showAll && (
+        <div className="mt-1 max-h-56 overflow-auto rounded-lg border border-zinc-800">
+          <table className="w-full font-mono text-[11px]">
+            <thead className="sticky top-0 bg-zinc-950 text-left text-zinc-500">
+              <tr>
+                <th className="px-2 py-1.5 font-medium">id</th>
+                <th className="px-2 py-1.5 font-medium">ext</th>
+                <th className="px-2 py-1.5 font-medium">res</th>
+                <th className="px-2 py-1.5 font-medium">fps</th>
+                <th className="px-2 py-1.5 text-right font-medium">size</th>
+                <th className="px-2 py-1.5 text-right font-medium">tbr</th>
+                <th className="px-2 py-1.5 font-medium">codecs</th>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            </thead>
+            <tbody>
+              {ladder.allSorted.map((f) => {
+                const key = `custom:${f.formatId}`;
+                const selected = item.selKey === key;
+                const res =
+                  f.height != null
+                    ? `${f.height}p${f.fps != null && f.fps >= 48 ? Math.round(f.fps) : ""}`
+                    : (f.isAudio ? "audio" : (f.resolution ?? "—"));
+                return (
+                  <tr
+                    key={f.formatId}
+                    onClick={() => setSelKey(item.id, key)}
+                    className={`cursor-pointer border-t border-zinc-800/60 transition-colors ${
+                      selected ? "bg-emerald-400/10 text-emerald-200" : "text-zinc-400 hover:bg-zinc-800/60"
+                    }`}
+                  >
+                    <td className="px-2 py-1">{f.formatId}</td>
+                    <td className="px-2 py-1">{f.ext}</td>
+                    <td className="px-2 py-1 tabular">{res}</td>
+                    <td className="px-2 py-1 tabular">{f.fps != null ? Math.round(f.fps) : "—"}</td>
+                    <td className="px-2 py-1 text-right tabular">
+                      {f.filesize != null ? fmtBytes(f.filesize, f.filesizeApprox) : "—"}
+                    </td>
+                    <td className="px-2 py-1 text-right tabular">
+                      {f.tbr != null ? `${Math.round(f.tbr)}k` : "—"}
+                    </td>
+                    <td className="px-2 py-1 text-zinc-500">
+                      {[shortCodec(f.vcodec === "none" ? null : f.vcodec), shortCodec(f.acodec === "none" ? null : f.acodec)]
+                        .filter((c) => c !== "—")
+                        .join(" + ") || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
 
 function QueueRow({ item }: { item: QueueItem }) {
-  const [showFormats, setShowFormats] = useState(false);
-  const setPreset = useQueue((s) => s.setPreset);
   const enqueue = useQueue((s) => s.enqueue);
   const cancel = useQueue((s) => s.cancel);
   const remove = useQueue((s) => s.remove);
@@ -109,6 +258,9 @@ function QueueRow({ item }: { item: QueueItem }) {
 
   const active = item.status === "downloading" || item.status === "merging";
   const pct = item.progress ?? (item.status === "completed" ? 100 : 0);
+  const pickable =
+    (item.status === "ready" || item.status === "error" || item.status === "cancelled") &&
+    item.formats.length > 0;
 
   return (
     <motion.div
@@ -147,29 +299,7 @@ function QueueRow({ item }: { item: QueueItem }) {
             ].filter(Boolean).join("  ·  ") || item.url}
           </p>
 
-          {/* quality picker */}
-          {(item.status === "ready" || item.status === "error" || item.status === "cancelled") && item.formats.length > 0 && (
-            <div className="mt-2 flex items-center gap-2">
-              <select
-                value={item.presetId}
-                onChange={(e) => setPreset(item.id, e.target.value)}
-                className="h-7 rounded-md border border-zinc-700 bg-zinc-950 px-1.5 font-mono text-[11px] text-zinc-200 focus:outline-none"
-              >
-                {PRESETS.map((p) => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
-                {item.presetId === "custom" && <option value="custom">Custom…</option>}
-              </select>
-              <button
-                onClick={() => setShowFormats((v) => !v)}
-                className="flex h-7 items-center gap-1 rounded-md px-1.5 font-mono text-[11px] text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200"
-              >
-                formats
-                <ChevronDown size={13} className={`transition-transform ${showFormats ? "rotate-180" : ""}`} />
-              </button>
-            </div>
-          )}
-          {showFormats && item.formats.length > 0 && <FormatTable item={item} />}
+          {pickable && <QualityPicker item={item} />}
 
           <div className="mt-1.5">
             <StatusLine item={item} />

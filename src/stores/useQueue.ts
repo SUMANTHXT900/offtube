@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { buildLadder, selectorForKey } from "../lib/ladder";
 import { api, type FormatInfo, type VideoMetadata } from "../lib/tauri";
 
 export type ItemStatus =
@@ -10,19 +11,11 @@ export type ItemStatus =
   | "error"
   | "cancelled";
 
-export interface QualityPreset {
-  id: string;
-  label: string;
-  selector: string;
-  audioOnly: boolean;
-}
-
-export const PRESETS: QualityPreset[] = [
-  { id: "p1080", label: "Best ≤1080p", selector: "bv*[height<=1080]+ba/b[height<=1080]/b", audioOnly: false },
-  { id: "p720", label: "Best ≤720p", selector: "bv*[height<=720]+ba/b[height<=720]/b", audioOnly: false },
-  { id: "p480", label: "Best ≤480p", selector: "bv*[height<=480]+ba/b[height<=480]/b", audioOnly: false },
-  { id: "audio", label: "Audio MP3", selector: "bestaudio/best", audioOnly: true },
-];
+/**
+ * Selection keys (see lib/ladder.ts):
+ *  'best' | 'h:1080' | 'audio:original' | 'audio:mp3' | 'custom:<formatId>'
+ */
+export type SelKey = string;
 
 export interface QueueItem {
   id: string;
@@ -34,9 +27,7 @@ export interface QueueItem {
   duration?: number | null;
   viewCount?: number | null;
   formats: FormatInfo[];
-  /** preset id, or "custom" when a table row was picked */
-  presetId: string;
-  customFormatId?: string;
+  selKey: SelKey;
   audioOnly: boolean;
   progress: number | null;
   speed?: string | null;
@@ -51,8 +42,7 @@ export interface QueueItem {
 interface QueueState {
   items: QueueItem[];
   fetchUrl: (url: string) => Promise<void>;
-  setPreset: (id: string, presetId: string) => void;
-  setCustomFormat: (id: string, formatId: string) => void;
+  setSelKey: (id: string, key: SelKey) => void;
   enqueue: (id: string) => Promise<void>;
   cancel: (id: string) => Promise<void>;
   remove: (id: string) => void;
@@ -70,16 +60,12 @@ let seq = 0;
 const nextId = () =>
   `q_${Date.now().toString(36)}_${(seq++).toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 
-function selectorFor(item: QueueItem): { selector: string; audioOnly: boolean } {
-  if (item.presetId === "custom" && item.customFormatId) {
-    const f = item.formats.find((x) => x.formatId === item.customFormatId);
-    if (!f) return { selector: "bv*+ba/b", audioOnly: false };
-    if (f.isVideo && f.isAudio) return { selector: f.formatId, audioOnly: false };
-    if (f.isVideo && !f.isAudio) return { selector: `${f.formatId}+bestaudio/best`, audioOnly: false };
-    return { selector: f.formatId, audioOnly: false };
-  }
-  const preset = PRESETS.find((p) => p.id === item.presetId) ?? PRESETS[0];
-  return { selector: preset.selector, audioOnly: preset.audioOnly };
+/** Default key: best ladder row, else first available video row, else audio. */
+export function defaultSelKey(meta: Pick<VideoMetadata, "formats" | "duration">): SelKey {
+  const ladder = buildLadder(meta.formats, meta.duration);
+  if (ladder.videoRows.length > 0) return "best";
+  if (ladder.audioRows.length > 0) return "audio:original";
+  return "best";
 }
 
 function metaToItem(id: string, url: string, meta: VideoMetadata): QueueItem {
@@ -93,7 +79,7 @@ function metaToItem(id: string, url: string, meta: VideoMetadata): QueueItem {
     duration: meta.duration,
     viewCount: meta.viewCount,
     formats: meta.formats,
-    presetId: PRESETS[0].id,
+    selKey: defaultSelKey(meta),
     audioOnly: false,
     progress: null,
     createdAt: Date.now(),
@@ -114,7 +100,7 @@ export const useQueue = create<QueueState>()((set, get) => ({
           url,
           status: "fetching",
           formats: [],
-          presetId: PRESETS[0].id,
+          selKey: "best",
           audioOnly: false,
           progress: null,
           createdAt: Date.now(),
@@ -137,33 +123,17 @@ export const useQueue = create<QueueState>()((set, get) => ({
     }
   },
 
-  setPreset: (id, presetId) =>
+  setSelKey: (id, selKey) =>
     set((s) => ({
       items: s.items.map((it) =>
-        it.id === id
-          ? {
-              ...it,
-              presetId,
-              customFormatId: undefined,
-              audioOnly: PRESETS.find((p) => p.id === presetId)?.audioOnly ?? false,
-            }
-          : it,
-      ),
-    })),
-
-  setCustomFormat: (id, formatId) =>
-    set((s) => ({
-      items: s.items.map((it) =>
-        it.id === id
-          ? { ...it, presetId: "custom", customFormatId: formatId, audioOnly: false }
-          : it,
+        it.id === id ? { ...it, selKey, audioOnly: selKey === "audio:mp3" } : it,
       ),
     })),
 
   enqueue: async (id: string) => {
     const item = get().items.find((i) => i.id === id);
     if (!item || item.status === "downloading" || item.status === "merging") return;
-    const { selector, audioOnly } = selectorFor(item);
+    const { selector, audioOnly } = selectorForKey(item.selKey, item.formats);
     set((s) => ({
       items: s.items.map((it) =>
         it.id === id

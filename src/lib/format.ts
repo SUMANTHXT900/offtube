@@ -9,10 +9,12 @@ export function fmtDuration(totalSeconds?: number | null): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
-/** Format bytes → 12.4 MiB (binary units, matching yt-dlp's display) */
-export function fmtBytes(bytes?: number | null): string {
+/** Format bytes → 12.4 MiB (binary units, matching yt-dlp's display).
+ *  Pass approx=true for estimated sizes → "~12.4 MiB" (yt-dlp -F convention). */
+export function fmtBytes(bytes?: number | null, approx = false): string {
   if (bytes == null || !Number.isFinite(bytes)) return "—";
-  if (bytes < 1024) return `${bytes} B`;
+  const prefix = approx ? "~" : "";
+  if (bytes < 1024) return `${prefix}${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
   let v = bytes / 1024;
   let u = 0;
@@ -20,7 +22,26 @@ export function fmtBytes(bytes?: number | null): string {
     v /= 1024;
     u++;
   }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[u]}`;
+  return `${prefix}${v.toFixed(v >= 100 ? 0 : 1)} ${units[u]}`;
+}
+
+/** Short codec labels for dense rows: avc1.640028 → avc, vp9.2 → vp9, av01 → av1. */
+export function shortCodec(codec?: string | null): string {
+  if (!codec || codec === "none") return "—";
+  const c = codec.toLowerCase();
+  if (c.startsWith("avc") || c.startsWith("h264")) return "avc";
+  if (c.startsWith("hev") || c.startsWith("h265") || c.startsWith("hvc")) return "hevc";
+  if (c.startsWith("av01") || c === "av1") return "av1";
+  if (c.startsWith("vp09") || c.startsWith("vp9")) return "vp9";
+  if (c.startsWith("mp4a") || c.startsWith("aac")) return "aac";
+  if (c.startsWith("opus")) return "opus";
+  if (c.startsWith("mp3")) return "mp3";
+  if (c.startsWith("vorbis")) return "vorbis";
+  if (c.startsWith("ec-3") || c.startsWith("ac-3")) return "dolby";
+  if (c.startsWith("dts")) return "dts";
+  if (c.startsWith("flac")) return "flac";
+  if (c.startsWith("alac")) return "alac";
+  return c.split(".")[0].slice(0, 8);
 }
 
 export function fmtCount(n?: number | null): string {

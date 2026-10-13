@@ -24,12 +24,24 @@ pub struct FormatInfo {
     pub format_id: String,
     pub ext: String,
     pub resolution: Option<String>,
+    pub height: Option<u64>,
+    pub width: Option<u64>,
     pub fps: Option<f64>,
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
+    /// Best-known size in bytes: exact `filesize` when present, else
+    /// `filesize_approx`, else estimated from `tbr * duration`.
     pub filesize: Option<u64>,
+    /// True when `filesize` is approximated (yt-dlp estimate or ours),
+    /// so the UI can render `~12.4 MiB` instead of faking precision.
+    pub filesize_approx: bool,
     pub tbr: Option<f64>,
+    pub vbr: Option<f64>,
     pub abr: Option<f64>,
+    pub asr: Option<f64>,
+    pub audio_channels: Option<u64>,
+    pub dynamic_range: Option<String>,
+    pub language: Option<String>,
     pub format_note: Option<String>,
     pub protocol: Option<String>,
     pub is_video: bool,
@@ -147,11 +159,41 @@ fn pick_thumbnail(v: &serde_json::Value) -> Option<String> {
     best.map(|(_, u)| u).or_else(|| str_field(v, "thumbnail"))
 }
 
-fn map_format(f: &serde_json::Value) -> Option<FormatInfo> {
+/// Storyboard / image-sprite pseudo-formats are not downloadable videos.
+/// They ride along in `-J` (ext/protocol `mhtml`, ids `sb0..sbN`) and must be
+/// dropped explicitly — codec flags alone are too fragile to key on.
+fn is_junk_format(format_id: &str, ext: &str, protocol: Option<&str>, note: Option<&str>) -> bool {
+    if ext == "mhtml" || ext == "jpg" || ext == "png" || ext == "webp" {
+        return true;
+    }
+    if matches!(protocol, Some("mhtml")) {
+        return true;
+    }
+    if matches!(note, Some("storyboard")) {
+        return true;
+    }
+    // sb0, sb1, ... storyboard sprites
+    if format_id.len() > 2 && format_id.starts_with("sb") && format_id[2..].chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    false
+}
+
+fn map_format(f: &serde_json::Value, duration: Option<u64>) -> Option<FormatInfo> {
     let format_id = f
         .get("format_id")
         .and_then(|x| x.as_str())?
         .to_string();
+    let ext = f
+        .get("ext")
+        .and_then(|x| x.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let protocol = f.get("protocol").and_then(|x| x.as_str());
+    let format_note = str_field(f, "format_note");
+    if is_junk_format(&format_id, &ext, protocol, format_note.as_deref()) {
+        return None;
+    }
     let vcodec = f
         .get("vcodec")
         .and_then(|x| x.as_str())
@@ -162,26 +204,85 @@ fn map_format(f: &serde_json::Value) -> Option<FormatInfo> {
         .map(|s| s.to_string());
     let is_video = matches!(&vcodec, Some(c) if c != "none");
     let is_audio = matches!(&acodec, Some(c) if c != "none");
-    let filesize = u64_field(f, "filesize").or_else(|| u64_field(f, "filesize_approx"));
+
+    // Size: exact first, yt-dlp's approx second, tbr*duration estimate last.
+    // tbr/vbr/abr are kbps = 1000 bits/s, so bytes = tbr * duration * 125.
+    let tbr = f64_field(f, "tbr");
+    let (filesize, filesize_approx) = match (
+        u64_field(f, "filesize"),
+        u64_field(f, "filesize_approx"),
+    ) {
+        (Some(b), _) => (Some(b), false),
+        (None, Some(b)) => (Some(b), true),
+        (None, None) => match (tbr, duration) {
+            (Some(t), Some(d)) if t.is_finite() && t > 0.0 && d > 0 => {
+                let est = (t * d as f64 * 125.0) as u64;
+                (Some(est), true)
+            }
+            _ => (None, false),
+        },
+    };
+
     Some(FormatInfo {
         format_id,
-        ext: f
-            .get("ext")
-            .and_then(|x| x.as_str())
-            .unwrap_or("?")
-            .to_string(),
+        ext,
         resolution: str_field(f, "resolution"),
+        height: u64_field(f, "height"),
+        width: u64_field(f, "width"),
         fps: f64_field(f, "fps"),
         vcodec,
         acodec,
         filesize,
-        tbr: f64_field(f, "tbr"),
-        abr: f64_field(f, "abr").or_else(|| f64_field(f, "vbr")),
-        format_note: str_field(f, "format_note"),
-        protocol: str_field(f, "protocol"),
+        filesize_approx,
+        tbr,
+        vbr: f64_field(f, "vbr"),
+        abr: f64_field(f, "abr"),
+        asr: f64_field(f, "asr"),
+        audio_channels: u64_field(f, "audio_channels"),
+        dynamic_range: str_field(f, "dynamic_range"),
+        language: str_field(f, "language"),
+        format_note,
+        protocol: protocol.map(|s| s.to_string()),
         is_video,
         is_audio,
     })
+}
+
+/// Selection flags (`-f`, `--match-filter`, …) must never leak into the
+/// metadata fetch: they would silently filter the dumped format list, so the
+/// picker would show a subset as if it were everything. Strip them (and their
+/// values) from user passthrough args on the `-J` path only.
+fn strip_selection_args(args: &[String]) -> Vec<String> {
+    const WITH_VALUE: &[&str] = &[
+        "-f", "--format",
+        "--match-filter", "--match-filter-range",
+        "-I", "--playlist-items",
+        "--min-filesize", "--max-filesize",
+        "--min-views", "--max-views",
+    ];
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        // --flag=value form
+        if a.starts_with("--") && a.contains('=') {
+            let key = a.split('=').next().unwrap_or("");
+            if WITH_VALUE.contains(&key) {
+                continue;
+            }
+            out.push(a.clone());
+            continue;
+        }
+        if WITH_VALUE.contains(&a.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
 }
 
 pub async fn fetch_metadata_impl(
@@ -200,7 +301,7 @@ pub async fn fetch_metadata_impl(
     let extra = extra_args
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| load_settings(app).extra_args);
-    args.extend(sidecar::split_extra_args(&extra));
+    args.extend(strip_selection_args(&sidecar::split_extra_args(&extra)));
     args.extend(sidecar::engine_wiring_args(app));
     args.push(url.to_string());
 
@@ -234,10 +335,11 @@ pub async fn fetch_metadata_impl(
         return Err("playlists land in v0.2 — paste a single video URL for now".to_string());
     }
 
+    let duration = u64_field(&v, "duration");
     let formats = v
         .get("formats")
         .and_then(|f| f.as_array())
-        .map(|arr| arr.iter().filter_map(map_format).collect())
+        .map(|arr| arr.iter().filter_map(|f| map_format(f, duration)).collect())
         .unwrap_or_default();
 
     let description = str_field(&v, "description").map(|d| {
@@ -254,7 +356,7 @@ pub async fn fetch_metadata_impl(
         title: str_field(&v, "title").unwrap_or_else(|| url.to_string()),
         uploader: str_field(&v, "uploader"),
         channel: str_field(&v, "channel"),
-        duration: u64_field(&v, "duration"),
+        duration,
         view_count: u64_field(&v, "view_count"),
         upload_date: str_field(&v, "upload_date"),
         description,
@@ -539,5 +641,72 @@ pub async fn cancel_download_impl(active: &ActiveMap, id: &str) -> Result<bool, 
             Ok(true)
         }
         None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fmt(id: &str) -> serde_json::Value {
+        json!({"format_id": id, "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a"})
+    }
+
+    #[test]
+    fn junk_storyboards_dropped() {
+        assert!(map_format(&json!({"format_id": "sb3", "ext": "mhtml", "protocol": "mhtml",
+            "format_note": "storyboard", "vcodec": "none", "acodec": "none"}), Some(60)).is_none());
+        assert!(map_format(&json!({"format_id": "sb0", "ext": "mhtml", "vcodec": "none",
+            "acodec": "none"}), Some(60)).is_none());
+        assert!(map_format(&fmt("22"), Some(60)).is_some());
+    }
+
+    #[test]
+    fn size_prefers_exact_then_approx_then_tbr_estimate() {
+        // Exact.
+        let f = map_format(&json!({"format_id": "22", "ext": "mp4", "vcodec": "avc1",
+            "acodec": "mp4a", "filesize": 1000, "filesize_approx": 2000, "tbr": 500}), Some(60)).unwrap();
+        assert_eq!((f.filesize, f.filesize_approx), (Some(1000), false));
+        // yt-dlp approx.
+        let f = map_format(&json!({"format_id": "248", "ext": "webm", "vcodec": "vp9",
+            "acodec": "none", "filesize_approx": 2000, "tbr": 500}), Some(60)).unwrap();
+        assert_eq!((f.filesize, f.filesize_approx), (Some(2000), true));
+        // tbr * duration * 125 (tbr is kbps = 1000 bits/s).
+        let f = map_format(&json!({"format_id": "313", "ext": "webm", "vcodec": "vp9",
+            "acodec": "none", "tbr": 1000.0}), Some(60)).unwrap();
+        assert_eq!((f.filesize, f.filesize_approx), (Some(1000 * 60 * 125), true));
+        // Nothing known.
+        let f = map_format(&json!({"format_id": "x", "ext": "mp4", "vcodec": "avc1",
+            "acodec": "none"}), None).unwrap();
+        assert_eq!((f.filesize, f.filesize_approx), (None, false));
+    }
+
+    #[test]
+    fn keeps_height_and_separate_bitrates() {
+        let f = map_format(&json!({"format_id": "137", "ext": "mp4", "vcodec": "avc1",
+            "acodec": "none", "height": 1080, "width": 1920, "fps": 30,
+            "vbr": 4500.5, "abr": null, "dynamic_range": "HDR10",
+            "protocol": "https"}), Some(60)).unwrap();
+        assert_eq!(f.height, Some(1080));
+        assert_eq!(f.width, Some(1920));
+        assert_eq!(f.vbr, Some(4500.5));
+        assert_eq!(f.abr, None);
+        assert_eq!(f.dynamic_range.as_deref(), Some("HDR10"));
+        assert!(f.is_video && !f.is_audio);
+    }
+
+    #[test]
+    fn strips_selection_args_from_metadata_fetch() {
+        let args: Vec<String> = ["--socket-timeout", "30", "-f", "bv[height<=720]",
+            "--extractor-args", "youtube:player-client=default",
+            "--match-filter", "duration>60", "--format-sort", "res",
+            "--min-views", "1000", "--remux-video", "mkv"]
+            .iter().map(|s| s.to_string()).collect();
+        let got = strip_selection_args(&args);
+        let want: Vec<String> = ["--socket-timeout", "30", "--extractor-args",
+            "youtube:player-client=default", "--format-sort", "res", "--remux-video", "mkv"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(got, want);
     }
 }

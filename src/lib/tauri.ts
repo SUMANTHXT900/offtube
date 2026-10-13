@@ -8,12 +8,22 @@ export interface FormatInfo {
   formatId: string;
   ext: string;
   resolution?: string | null;
+  height?: number | null;
+  width?: number | null;
   fps?: number | null;
   vcodec?: string | null;
   acodec?: string | null;
+  /** Best-known size in bytes (exact preferred, else estimate). */
   filesize?: number | null;
+  /** True when filesize is approximated — render with `~`. */
+  filesizeApprox: boolean;
   tbr?: number | null;
+  vbr?: number | null;
   abr?: number | null;
+  asr?: number | null;
+  audioChannels?: number | null;
+  dynamicRange?: string | null;
+  language?: string | null;
   formatNote?: string | null;
   protocol?: string | null;
   isVideo: boolean;
