@@ -49,7 +49,7 @@ function StatusLine({ item }: { item: QueueItem }) {
     case "cancelled":
       return <span className={cls}>cancelled</span>;
     default:
-      return <span className={cls}>ready</span>;
+      return <span className={cls}>{item.detail ?? "ready"}</span>;
   }
 }
 
@@ -375,7 +375,7 @@ function QueueRow({ item }: { item: QueueItem }) {
                     enqueue(item.id);
                   }
                 }}
-                title={item.title ? "Retry download" : "Retry fetch"}
+                title={item.title ? "Retry / resume download" : "Retry fetch"}
                 className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-100"
               >
                 <RotateCcw size={15} />

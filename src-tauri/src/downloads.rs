@@ -443,6 +443,10 @@ pub async fn start_download_impl(
         "--progress".to_string(),
         "--no-color".to_string(),
         "--no-warnings".to_string(),
+        // Explicit even though it's yt-dlp's default: interrupted downloads
+        // (cancel, crash, restart) continue from `.part` files instead of
+        // starting over. Same output template => same resume point.
+        "--continue".to_string(),
         "-f".to_string(),
         req.format_selector.clone(),
         "-o".to_string(),

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { buildLadder, selectorForKey } from "../lib/ladder";
 import { api, type FormatInfo, type VideoMetadata } from "../lib/tauri";
 
@@ -109,7 +110,9 @@ function metaToItem(id: string, url: string, meta: VideoMetadata): QueueItem {
   };
 }
 
-export const useQueue = create<QueueState>()((set, get) => ({
+export const useQueue = create<QueueState>()(
+  persist(
+    (set, get) => ({
   items: [],
 
   fetchUrl: async (rawUrl: string) => {
@@ -247,4 +250,33 @@ export const useQueue = create<QueueState>()((set, get) => ({
         it.id === id ? { ...it, status: "cancelled" as const, speed: null, eta: null } : it,
       ),
     })),
-}));
+    }),
+    {
+      name: "offtube-queue",
+      version: 1,
+      // Persist the list only — actions stay in memory.
+      partialize: (s) => ({ items: s.items }),
+      merge: (persisted, current) => {
+        const saved = (persisted as { items?: QueueItem[] } | undefined)?.items ?? [];
+        // Anything mid-flight when the app closed goes back to ready, keeping
+        // its URL + quality pick: pressing "get" resumes from the .part file.
+        // Half-fetched rows (no metadata) are dropped.
+        const items = saved
+          .filter((it) => it.status !== "fetching")
+          .map((it) =>
+            it.status === "downloading" || it.status === "merging"
+              ? {
+                  ...it,
+                  status: "ready" as const,
+                  progress: null,
+                  speed: null,
+                  eta: null,
+                  detail: "interrupted — press get to resume",
+                }
+              : it,
+          );
+        return { ...current, items };
+      },
+    },
+  ),
+);
