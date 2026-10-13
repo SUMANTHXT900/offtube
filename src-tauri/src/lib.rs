@@ -126,6 +126,15 @@ async fn bandwidth_status(app: AppHandle) -> net::BandwidthStatus {
     net::bandwidth_status(&app)
 }
 
+/// Manual "check speed now" from Settings: fresh probe, stamped cache,
+///
+/// and the Auto decision the next download will use.
+#[tauri::command]
+async fn reprobe_bandwidth(app: AppHandle) -> net::BandwidthStatus {
+    let _ = net::probe_now(&app).await;
+    net::bandwidth_status(&app)
+}
+
 #[tauri::command]
 async fn start_download(
     app: AppHandle,
@@ -182,6 +191,7 @@ pub fn run() {
             start_download,
             cancel_download,
             bandwidth_status,
+            reprobe_bandwidth,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

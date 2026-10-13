@@ -154,6 +154,7 @@ export const api = {
   fetchMetadata: (url: string, extraArgs?: string | null, fetchId?: string | null) =>
     invoke<VideoMetadata>("fetch_metadata", { url, extraArgs, fetchId }),
   bandwidthStatus: () => invoke<BandwidthStatus>("bandwidth_status"),
+  reprobeBandwidth: () => invoke<BandwidthStatus>("reprobe_bandwidth"),
   startDownload: (req: StartRequest) =>
     invoke<void>("start_download", { req }),
   cancelDownload: (id: string) => invoke<boolean>("cancel_download", { id }),

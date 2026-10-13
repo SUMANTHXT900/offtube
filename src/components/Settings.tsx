@@ -194,6 +194,18 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               <>{s.fragments} DASH/HLS parts fetched at once — higher uses more bandwidth.</>
             )}
           </p>
+          <button
+            onClick={() => s.reprobe()}
+            disabled={s.busy === "speed"}
+            className="mt-2 flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 font-mono text-[11px] text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-200 active:scale-[0.98] disabled:opacity-50"
+          >
+            {s.busy === "speed" ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Gauge size={12} />
+            )}
+            {s.busy === "speed" ? "Measuring…" : "Check speed now"}
+          </button>
 
           <div className="mt-3 flex items-center justify-between gap-3 border-t border-zinc-800/80 pt-3">
             <div>

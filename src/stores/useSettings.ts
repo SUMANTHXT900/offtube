@@ -15,7 +15,7 @@ interface SettingsState {
   engine: EngineStatus | null;
   engineProgress: EngineProgress | null;
   updateCheck: UpdateCheck | null;
-  busy: string | null; // "load" | "check" | "update" | "pick"
+  busy: string | null; // "load" | "check" | "update" | "pick" | "speed"
   notice: string | null;
   loaded: boolean;
   load: () => Promise<void>;
@@ -27,6 +27,7 @@ interface SettingsState {
   setAutofetch: (v: boolean) => Promise<void>;
   checkUpdate: () => Promise<void>;
   runUpdate: () => Promise<void>;
+  reprobe: () => Promise<void>;
   setEngineProgress: (p: EngineProgress | null) => void;
   dismissNotice: () => void;
 }
@@ -153,6 +154,16 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   },
 
   setEngineProgress: (p) => set({ engineProgress: p }),
+
+  reprobe: async () => {
+    set({ busy: "speed" });
+    try {
+      const bandwidth = await api.reprobeBandwidth();
+      set({ bandwidth });
+    } finally {
+      set({ busy: null });
+    }
+  },
 
   dismissNotice: () => set({ notice: null }),
 }));
