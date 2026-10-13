@@ -64,6 +64,7 @@ export default function App() {
       <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
         <div className="mx-auto flex h-12 max-w-5xl items-center justify-between px-4">
           <div className="flex items-center gap-2.5">
+            <img src="/icon.png" alt="Offtube" className="h-5 w-5 rounded-[5px]" />
             <span className="font-mono text-[13px] font-bold tracking-[0.18em]">OFFTUBE</span>
             <span className="rounded border border-zinc-800 px-1 py-px font-mono text-[10px] text-zinc-600">v0.1</span>
             <EngineDot />

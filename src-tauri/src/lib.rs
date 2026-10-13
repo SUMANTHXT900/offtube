@@ -11,7 +11,7 @@ mod sidecar;
 mod updater;
 
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 pub struct AppState {
     pub downloads: Arc<downloads::ActiveMap>,
@@ -165,6 +165,16 @@ pub fn run() {
             downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
         .setup(|app| {
+            // Window chrome icon: dev exes don't embed the .ico resource, so
+            // set it at runtime from the compiled-in PNG (title bar, taskbar,
+            // alt-tab). Never allowed to break boot.
+            if let Some(win) = app.get_webview_window("main") {
+                if let Ok(icon) =
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+                {
+                    let _ = win.set_icon(icon);
+                }
+            }
             // Silent engine check (max once/24h, offline-tolerant) — never
             // blocks window creation.
             let handle = app.handle().clone();
