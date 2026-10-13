@@ -398,7 +398,7 @@ fn strip_quotes(s: &str) -> String {
 /// progressive streams are the only case it can't help (those need an
 /// external downloader like aria2c; future work, not a new sidecar today).
 /// Returns the default flags unless the user already tuned `-N` themselves.
-fn default_fragment_args(extra: &[String]) -> Vec<String> {
+fn default_fragment_args(extra: &[String], fragments: u32) -> Vec<String> {
     let tuned = extra.iter().any(|a| {
         a == "-N"
             || a == "--concurrent-fragments"
@@ -407,7 +407,10 @@ fn default_fragment_args(extra: &[String]) -> Vec<String> {
     if tuned {
         Vec::new()
     } else {
-        vec!["--concurrent-fragments".to_string(), "4".to_string()]
+        vec![
+            "--concurrent-fragments".to_string(),
+            fragments.to_string(),
+        ]
     }
 }
 
@@ -470,7 +473,8 @@ pub async fn start_download_impl(
         .unwrap_or_else(|| load_settings(&app).extra_args);
     let extra_list = sidecar::split_extra_args(&extra);
     args.extend(extra_list.clone());
-    args.extend(default_fragment_args(&extra_list));
+    let fragments = crate::settings::effective_fragments(&app);
+    args.extend(default_fragment_args(&extra_list, fragments));
     args.push(req.url.clone());
 
     let child = sidecar::spawn_tool(&app, TOOL_YTDLP, &args)?;
@@ -721,8 +725,12 @@ mod tests {
     fn fragment_parallelism_default_and_override() {
         let empty: Vec<String> = vec![];
         assert_eq!(
-            default_fragment_args(&empty),
+            default_fragment_args(&empty, 4),
             vec!["--concurrent-fragments".to_string(), "4".to_string()]
+        );
+        assert_eq!(
+            default_fragment_args(&empty, 8),
+            vec!["--concurrent-fragments".to_string(), "8".to_string()]
         );
         for tuned in [
             vec!["-N", "8"],
@@ -730,7 +738,7 @@ mod tests {
             vec!["--concurrent-fragments=8"],
         ] {
             let args: Vec<String> = tuned.iter().map(|s| s.to_string()).collect();
-            assert!(default_fragment_args(&args).is_empty(), "{tuned:?}");
+            assert!(default_fragment_args(&args, 4).is_empty(), "{tuned:?}");
         }
     }
 

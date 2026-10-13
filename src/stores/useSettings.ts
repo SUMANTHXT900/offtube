@@ -1,11 +1,16 @@
 import { create } from "zustand";
-import { api, type EngineStatus, type UpdateCheck } from "../lib/tauri";
+import { api, type EngineProgress, type EngineStatus, type UpdateCheck } from "../lib/tauri";
+
+export const FRAGMENT_OPTIONS = [1, 2, 4, 8, 16] as const;
+export const DEFAULT_FRAGMENTS = 4;
 
 interface SettingsState {
   downloadDir: string;
   preferNightly: boolean;
   extraArgs: string;
+  fragments: number;
   engine: EngineStatus | null;
+  engineProgress: EngineProgress | null;
   updateCheck: UpdateCheck | null;
   busy: string | null; // "load" | "check" | "update" | "pick"
   notice: string | null;
@@ -15,8 +20,10 @@ interface SettingsState {
   pickDir: () => Promise<void>;
   setNightly: (v: boolean) => Promise<void>;
   setExtraArgs: (v: string) => Promise<void>;
+  setFragments: (v: number) => Promise<void>;
   checkUpdate: () => Promise<void>;
   runUpdate: () => Promise<void>;
+  setEngineProgress: (p: EngineProgress | null) => void;
   dismissNotice: () => void;
 }
 
@@ -26,7 +33,9 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   downloadDir: "",
   preferNightly: false,
   extraArgs: "",
+  fragments: DEFAULT_FRAGMENTS,
   engine: null,
+  engineProgress: null,
   updateCheck: null,
   busy: null,
   notice: null,
@@ -44,6 +53,7 @@ export const useSettings = create<SettingsState>()((set, get) => ({
         downloadDir: s.download_dir ?? dir,
         preferNightly: s.prefer_nightly,
         extraArgs: s.extra_args ?? "",
+        fragments: s.concurrent_fragments ?? DEFAULT_FRAGMENTS,
         engine,
         loaded: true,
       });
@@ -85,6 +95,12 @@ export const useSettings = create<SettingsState>()((set, get) => ({
     }, 600);
   },
 
+  setFragments: async (v) => {
+    const clamped = Math.min(16, Math.max(1, Math.round(v)));
+    set({ fragments: clamped });
+    await api.saveSettings({ concurrent_fragments: clamped });
+  },
+
   checkUpdate: async () => {
     set({ busy: "check", notice: null, updateCheck: null });
     try {
@@ -103,7 +119,7 @@ export const useSettings = create<SettingsState>()((set, get) => ({
   },
 
   runUpdate: async () => {
-    set({ busy: "update", notice: null });
+    set({ busy: "update", notice: null, engineProgress: null });
     try {
       const res = await api.updateEngine(get().preferNightly);
       const engine = await api.engineStatus();
@@ -117,9 +133,11 @@ export const useSettings = create<SettingsState>()((set, get) => ({
     } catch (e) {
       set({ notice: `Engine update failed: ${e instanceof Error ? e.message : String(e)}` });
     } finally {
-      set({ busy: null });
+      set({ busy: null, engineProgress: null });
     }
   },
+
+  setEngineProgress: (p) => set({ engineProgress: p }),
 
   dismissNotice: () => set({ notice: null }),
 }));

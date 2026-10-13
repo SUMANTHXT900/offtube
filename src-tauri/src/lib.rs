@@ -43,6 +43,9 @@ fn save_settings(
     if let Some(v) = patch.last_engine_check {
         current.last_engine_check = v;
     }
+    if let Some(v) = patch.concurrent_fragments {
+        current.concurrent_fragments = v;
+    }
     settings::save_settings(&app, &current)?;
     Ok(current)
 }

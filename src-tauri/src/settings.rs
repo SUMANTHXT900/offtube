@@ -26,6 +26,9 @@ pub struct Settings {
     pub extra_args: String,
     #[serde(default)]
     pub last_engine_check: Option<i64>,
+    /// DASH/HLS fragments downloaded at once. None = 4 (app default).
+    #[serde(default)]
+    pub concurrent_fragments: Option<u32>,
 }
 
 impl Default for Settings {
@@ -35,6 +38,7 @@ impl Default for Settings {
             prefer_nightly: false,
             extra_args: String::new(),
             last_engine_check: None,
+            concurrent_fragments: None,
         }
     }
 }
@@ -45,6 +49,7 @@ pub struct SettingsPatch {
     pub prefer_nightly: Option<bool>,
     pub extra_args: Option<String>,
     pub last_engine_check: Option<Option<i64>>,
+    pub concurrent_fragments: Option<Option<u32>>,
 }
 
 pub fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -85,6 +90,13 @@ pub fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String>
     }
 }
 
+/// Effective fragment parallelism: user setting clamped to 1..=16, else 4.
+pub fn effective_fragments(app: &AppHandle) -> u32 {
+    load_settings(app)
+        .concurrent_fragments
+        .unwrap_or(4)
+        .clamp(1, 16)
+}
 /// Default download location: ~/Videos/Offtube, falling back to ~/Downloads/Offtube.
 pub fn default_download_dir() -> String {
     let base = dirs::video_dir()

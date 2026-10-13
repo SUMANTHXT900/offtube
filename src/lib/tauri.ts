@@ -75,6 +75,7 @@ export interface Settings {
   prefer_nightly: boolean;
   extra_args: string;
   last_engine_check?: number | null;
+  concurrent_fragments?: number | null;
 }
 
 export interface SettingsPatch {
@@ -82,6 +83,13 @@ export interface SettingsPatch {
   prefer_nightly?: boolean;
   extra_args?: string;
   last_engine_check?: number | null;
+  concurrent_fragments?: number | null;
+}
+
+export interface EngineProgress {
+  stage: string;
+  percent?: number | null;
+  detail: string;
 }
 
 export interface StartRequest {
